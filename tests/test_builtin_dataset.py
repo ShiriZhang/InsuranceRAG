@@ -2,7 +2,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from insurance_rag.builtin_dataset import discover_builtin_pdfs
+from insurance_rag.builtin_dataset import discover_builtin_pdfs, select_background_pdfs
 
 
 def _unique_test_root() -> Path:
@@ -32,3 +32,19 @@ def test_discover_builtin_pdfs_returns_empty_tuple_for_missing_root():
     docs = discover_builtin_pdfs(root)
 
     assert docs == ()
+
+
+def test_select_background_pdfs_caps_count():
+    root = _unique_test_root()
+    try:
+        for index in range(5):
+            pdf_path = root / f"公司{index}" / f"产品{index}" / "条款书.pdf"
+            pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            pdf_path.write_bytes(b"%PDF-1.4")
+        discovered = discover_builtin_pdfs(root)
+
+        selected = select_background_pdfs(discovered, limit=2)
+
+        assert len(selected) == 2
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

@@ -24,3 +24,10 @@ def discover_builtin_pdfs(root: Path) -> tuple[BuiltInPdf, ...]:
         product = parts[1] if len(parts) >= 2 else path.stem
         docs.append(BuiltInPdf(path=path, company_name=company, product_name=product))
     return tuple(docs)
+
+
+def select_background_pdfs(
+    docs: tuple[BuiltInPdf, ...],
+    limit: int = 8,
+) -> tuple[BuiltInPdf, ...]:
+    return docs[:limit]

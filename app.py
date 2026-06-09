@@ -8,6 +8,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from insurance_rag.chunker import chunk_pages
+from insurance_rag.builtin_dataset import discover_builtin_pdfs, select_background_pdfs
 from insurance_rag.config import AppConfig
 from insurance_rag.document_loader import parse_pdf_bytes
 from insurance_rag.models import AnswerPayload
@@ -21,6 +22,7 @@ st.set_page_config(page_title="保单解释助手", page_icon="📄", layout="wi
 def init_state() -> None:
     st.session_state.setdefault("parse_result", None)
     st.session_state.setdefault("policy_index", None)
+    st.session_state.setdefault("builtin_index", None)
     st.session_state.setdefault("embedder", None)
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("policy_chunks", ())
@@ -29,9 +31,36 @@ def init_state() -> None:
 def clear_policy_state() -> None:
     st.session_state.parse_result = None
     st.session_state.policy_index = None
+    st.session_state.builtin_index = None
     st.session_state.embedder = None
     st.session_state.messages = []
     st.session_state.policy_chunks = ()
+
+
+def build_builtin_background_index(config: AppConfig, embedder: OpenAIEmbedder):
+    docs = select_background_pdfs(discover_builtin_pdfs(Path("documents")), limit=8)
+    chunks = []
+    for doc in docs:
+        try:
+            parsed = parse_pdf_bytes(doc.path.read_bytes(), doc.path.name, config)
+        except Exception:
+            continue
+        chunks.extend(
+            chunk_pages(
+                parsed.pages,
+                source_name=doc.display_name,
+                source_type="built_in_dataset",
+                chunk_size=config.chunk_size,
+                overlap=config.chunk_overlap,
+            )
+        )
+    if not chunks:
+        return None
+    try:
+        return build_index(tuple(chunks), embedder)
+    except Exception as exc:
+        st.warning(f"内置资料库背景索引建立失败，已仅使用用户保单：{exc}")
+        return None
 
 
 def render_citations(payload: AnswerPayload) -> None:
@@ -94,9 +123,13 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
         st.error(f"建立检索索引时出错：{exc}")
         return
 
+    progress.progress(90, text="准备内置资料库背景索引")
+    builtin_index = build_builtin_background_index(config, embedder)
+
     st.session_state.parse_result = parse_result
     st.session_state.policy_chunks = chunks
     st.session_state.policy_index = policy_index
+    st.session_state.builtin_index = builtin_index
     st.session_state.embedder = embedder
     st.session_state.messages = []
     progress.progress(100, text="解析完成")
@@ -160,6 +193,7 @@ def main() -> None:
                         config=config,
                         policy_index=st.session_state.policy_index,
                         embedder=st.session_state.embedder,
+                        builtin_index=st.session_state.builtin_index,
                     )
                     payload = chain.answer(question)
                 except Exception as exc:
