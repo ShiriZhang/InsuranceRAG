@@ -8,12 +8,16 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from insurance_rag.chunker import chunk_pages
-from insurance_rag.builtin_dataset import discover_builtin_pdfs, select_background_pdfs
+from insurance_rag.builtin_dataset import (
+    BuiltInPdf,
+    discover_builtin_pdfs,
+    select_background_pdfs,
+)
 from insurance_rag.config import AppConfig
 from insurance_rag.document_loader import parse_pdf_bytes
 from insurance_rag.models import AnswerPayload
 from insurance_rag.rag_chain import RagChain
-from insurance_rag.retriever import OpenAIEmbedder, build_index
+from insurance_rag.retriever import InMemoryVectorIndex, OpenAIEmbedder, build_index
 
 
 st.set_page_config(page_title="保单解释助手", page_icon="📄", layout="wide")
@@ -37,8 +41,16 @@ def clear_policy_state() -> None:
     st.session_state.policy_chunks = ()
 
 
-def build_builtin_background_index(config: AppConfig, embedder: OpenAIEmbedder):
-    docs = select_background_pdfs(discover_builtin_pdfs(Path("documents")), limit=8)
+@st.cache_data(show_spinner=False)
+def discover_builtin_pdf_metadata() -> tuple[BuiltInPdf, ...]:
+    return discover_builtin_pdfs(Path("documents"))
+
+
+def build_builtin_background_index(
+    config: AppConfig,
+    embedder: OpenAIEmbedder,
+) -> InMemoryVectorIndex | None:
+    docs = select_background_pdfs(discover_builtin_pdf_metadata(), limit=8)
     chunks = []
     for doc in docs:
         try:
@@ -55,11 +67,13 @@ def build_builtin_background_index(config: AppConfig, embedder: OpenAIEmbedder):
             )
         )
     if not chunks:
+        if docs:
+            st.warning("内置资料库背景索引未建立，系统仍可基于用户保单回答。")
         return None
     try:
         return build_index(tuple(chunks), embedder)
     except Exception as exc:
-        st.warning(f"内置资料库背景索引建立失败，已仅使用用户保单：{exc}")
+        st.warning(f"内置资料库背景索引建立失败，系统仍可基于用户保单回答：{exc}")
         return None
 
 
@@ -123,15 +137,17 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
         st.error(f"建立检索索引时出错：{exc}")
         return
 
-    progress.progress(90, text="准备内置资料库背景索引")
-    builtin_index = build_builtin_background_index(config, embedder)
-
     st.session_state.parse_result = parse_result
     st.session_state.policy_chunks = chunks
     st.session_state.policy_index = policy_index
-    st.session_state.builtin_index = builtin_index
+    st.session_state.builtin_index = None
     st.session_state.embedder = embedder
     st.session_state.messages = []
+
+    progress.progress(90, text="准备内置资料库背景索引")
+    builtin_index = build_builtin_background_index(config, embedder)
+    if builtin_index is not None:
+        st.session_state.builtin_index = builtin_index
     progress.progress(100, text="解析完成")
 
 
