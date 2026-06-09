@@ -35,11 +35,21 @@ class InMemoryVectorIndex:
         chunks: tuple[DocumentChunk, ...],
         embeddings: list[list[float]],
     ) -> "InMemoryVectorIndex":
+        if not embeddings:
+            raise ValueError("Cannot build vector index without embeddings.")
+        if len(chunks) != len(embeddings):
+            raise ValueError("Number of chunks and embeddings must match.")
         matrix = np.array(embeddings, dtype=np.float32)
         return cls(chunks=chunks, matrix=matrix)
 
     def search(self, query_embedding: list[float], top_k: int) -> list[SearchResult]:
+        if top_k <= 0:
+            return []
         query = np.array(query_embedding, dtype=np.float32)
+        if query.shape[0] != self.matrix.shape[1]:
+            raise ValueError(
+                "Query embedding dimension must match index embedding dimension."
+            )
         norm = np.linalg.norm(query)
         if norm == 0:
             return []
@@ -56,5 +66,7 @@ def build_index(
     chunks: tuple[DocumentChunk, ...],
     embedder: OpenAIEmbedder,
 ) -> InMemoryVectorIndex:
+    if not chunks:
+        raise ValueError("Cannot build vector index without embeddings.")
     embeddings = embedder.embed_texts([chunk.text for chunk in chunks])
     return InMemoryVectorIndex.from_embeddings(chunks, embeddings)
