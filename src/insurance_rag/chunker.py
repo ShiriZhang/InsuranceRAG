@@ -18,16 +18,23 @@ KNOWN_TITLES = (
 )
 
 
+def _looks_like_heading(normalized_line: str, title: str) -> bool:
+    if normalized_line == title:
+        return True
+    if not normalized_line.startswith(title):
+        return False
+
+    suffix = normalized_line[len(title) :].strip()
+    return bool(suffix) and len(suffix) <= 8 and re.match(r"^[：:、\-\s（(]", suffix) is not None
+
+
 def infer_section_title(text: str, current_title: str) -> str:
     first_lines = [line.strip() for line in text.splitlines()[:5] if line.strip()]
     for line in first_lines:
         normalized = re.sub(r"^[第\d一二三四五六七八九十百、\.\s条款章节]+", "", line)
         for title in KNOWN_TITLES:
-            if title in normalized:
+            if _looks_like_heading(normalized, title):
                 return title
-    for title in KNOWN_TITLES:
-        if title in text[:120]:
-            return title
     return current_title
 
 
