@@ -21,17 +21,30 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
+如果 PowerShell 因执行策略阻止虚拟环境激活，可以在当前终端运行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+也可以不激活虚拟环境，直接使用虚拟环境里的 Python 启动应用：
+
+```powershell
+.\.venv\Scripts\python -m streamlit run app.py
+```
+
 ## 配置 OpenAI API Key
 
 ```powershell
 $env:OPENAI_API_KEY="your-api-key"
 ```
 
-使用 OpenAI API 时，用户问题、被检索到的保单片段和 embeddings 输入会发送给 OpenAI。
+使用 OpenAI API 时，上传和索引阶段抽取出的保单文本片段会发送给 OpenAI 用于生成 embeddings；回答生成阶段，用户问题和被检索到的保单片段会发送给 OpenAI chat model。
 
 ## OCR 说明
 
-OCR fallback 使用 `pytesseract`。如果本机没有安装 Tesseract OCR 程序，应用仍会处理文字型 PDF，但扫描页可能无法识别。
+OCR fallback 使用 `pytesseract`，它只是 Python wrapper。扫描版中文 PDF 的 OCR 需要额外安装外部 Tesseract OCR runtime、中文语言数据 `chi_sim`，并确保 Tesseract 可以在 PATH 中被找到。如果没有安装 Tesseract 或中文语言数据，应用仍会处理文字型 PDF，但扫描页可能无法识别。
 
 ## 启动
 
