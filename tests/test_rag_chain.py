@@ -1,10 +1,13 @@
 from insurance_rag.models import DocumentChunk
+from insurance_rag.retriever import SearchResult
 from insurance_rag.rag_chain import (
     REFUSAL_ANSWER,
+    RagChain,
     build_citation,
     build_messages,
     should_use_builtin_context,
 )
+from insurance_rag.config import AppConfig
 
 
 def make_chunk(source_type: str = "user_policy") -> DocumentChunk:
@@ -16,7 +19,74 @@ def make_chunk(source_type: str = "user_policy") -> DocumentChunk:
         source_type=source_type,
         source_name="user.pdf" if source_type == "user_policy" else "内置条款.pdf",
         extraction_method="text",
+        quality_notes=("扫描件文字可能不完整",),
     )
+
+
+class FakeEmbedder:
+    def __init__(self, embeddings: list[list[float]]) -> None:
+        self.embeddings = embeddings
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return self.embeddings
+
+
+class FakeIndex:
+    def __init__(
+        self,
+        chunks: list[DocumentChunk] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.chunks = chunks or []
+        self.error = error
+        self.calls: list[tuple[list[float], int]] = []
+
+    def search(self, query_embedding: list[float], top_k: int) -> list[SearchResult]:
+        self.calls.append((query_embedding, top_k))
+        if self.error:
+            raise self.error
+        return [SearchResult(chunk=chunk, score=1.0) for chunk in self.chunks]
+
+
+class FakeChatClient:
+    def __init__(self, answer: str = "等待期为九十日。") -> None:
+        self.calls: list[dict[str, object]] = []
+        self.chat = self
+        self.completions = self
+        self.answer = answer
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+
+        class Message:
+            content = self.answer
+
+        class Choice:
+            message = Message()
+
+        class Response:
+            choices = [Choice()]
+
+        return Response()
+
+
+def make_chain(
+    monkeypatch,
+    *,
+    embedder: FakeEmbedder | None = None,
+    policy_index: FakeIndex | None = None,
+    builtin_index: FakeIndex | None = None,
+    chat_client: FakeChatClient | None = None,
+) -> tuple[RagChain, FakeChatClient]:
+    client = chat_client or FakeChatClient()
+    monkeypatch.setattr("insurance_rag.rag_chain.OpenAI", lambda api_key: client)
+    chain = RagChain(
+        config=AppConfig(openai_api_key="test-key", policy_top_k=2, builtin_top_k=1),
+        policy_index=policy_index or FakeIndex([make_chunk()]),
+        builtin_index=builtin_index,
+        embedder=embedder or FakeEmbedder([[1.0, 0.0]]),
+    )
+    return chain, client
 
 
 def test_should_use_builtin_context_for_term_question():
@@ -27,12 +97,35 @@ def test_should_not_use_builtin_context_for_specific_policy_question():
     assert should_use_builtin_context("这份保单等待期是多少？", policy_result_count=3) is False
 
 
+def test_should_not_use_builtin_context_when_policy_has_no_results():
+    assert should_use_builtin_context("什么是等待期？", policy_result_count=0) is False
+
+
 def test_build_citation_uses_chunk_metadata():
     citation = build_citation(make_chunk())
 
     assert citation.page_number == 4
     assert citation.section_title == "等待期"
     assert citation.excerpt == "等待期为九十日。"
+    assert citation.quality_notes == ("扫描件文字可能不完整",)
+
+
+def test_build_citation_normalizes_whitespace_and_truncates():
+    chunk = make_chunk()
+    long_text = " 等待期\n\n为\t九十日。 " + "补充说明" * 80
+    chunk = DocumentChunk(
+        chunk_id=chunk.chunk_id,
+        text=long_text,
+        page_number=chunk.page_number,
+        section_title=chunk.section_title,
+        source_type=chunk.source_type,
+        source_name=chunk.source_name,
+        extraction_method=chunk.extraction_method,
+    )
+
+    citation = build_citation(chunk, max_chars=11)
+
+    assert citation.excerpt == "等待期 为 九十日。..."
 
 
 def test_build_messages_include_no_claim_decision_rule():
@@ -45,3 +138,72 @@ def test_build_messages_include_no_claim_decision_rule():
 
 def test_refusal_answer_is_evidence_limited():
     assert "没有找到足够明确的依据" in REFUSAL_ANSWER
+
+
+def test_answer_policy_first_happy_path_includes_policy_and_builtin_citations(monkeypatch):
+    policy_chunk = make_chunk()
+    builtin_chunk = make_chunk(source_type="builtin")
+    chain, client = make_chain(
+        monkeypatch,
+        policy_index=FakeIndex([policy_chunk]),
+        builtin_index=FakeIndex([builtin_chunk]),
+    )
+
+    payload = chain.answer("什么是等待期？")
+
+    assert payload.answer == "等待期为九十日。"
+    assert payload.policy_citations[0].source_name == "user.pdf"
+    assert payload.builtin_citations[0].source_name == "内置条款.pdf"
+    assert len(client.calls) == 1
+    assert "用户保单资料" in client.calls[0]["messages"][1]["content"]
+    assert "内置资料库背景" in client.calls[0]["messages"][1]["content"]
+
+
+def test_answer_refuses_when_policy_search_returns_no_results_without_chat(monkeypatch):
+    chain, client = make_chain(monkeypatch, policy_index=FakeIndex([]))
+
+    payload = chain.answer("什么是等待期？")
+
+    assert payload.answer == REFUSAL_ANSWER
+    assert payload.policy_citations == ()
+    assert payload.builtin_citations == ()
+    assert client.calls == []
+
+
+def test_answer_refuses_when_embedding_response_is_empty_with_warning(monkeypatch):
+    chain, client = make_chain(monkeypatch, embedder=FakeEmbedder([]))
+
+    payload = chain.answer("等待期是多少？")
+
+    assert payload.answer == REFUSAL_ANSWER
+    assert any("向量生成失败" in warning for warning in payload.warnings)
+    assert client.calls == []
+
+
+def test_answer_refuses_when_policy_index_search_errors_without_chat(monkeypatch):
+    chain, client = make_chain(
+        monkeypatch,
+        policy_index=FakeIndex(error=ValueError("dimension mismatch")),
+    )
+
+    payload = chain.answer("等待期是多少？")
+
+    assert payload.answer == REFUSAL_ANSWER
+    assert any("保单检索失败" in warning for warning in payload.warnings)
+    assert client.calls == []
+
+
+def test_answer_degrades_to_policy_only_when_builtin_index_errors(monkeypatch):
+    chain, client = make_chain(
+        monkeypatch,
+        builtin_index=FakeIndex(error=ValueError("dimension mismatch")),
+    )
+
+    payload = chain.answer("什么是等待期？")
+
+    assert payload.answer == "等待期为九十日。"
+    assert len(payload.policy_citations) == 1
+    assert payload.builtin_citations == ()
+    assert any("内置资料库检索失败" in warning for warning in payload.warnings)
+    assert len(client.calls) == 1
+    assert "内置资料库背景：无" in client.calls[0]["messages"][1]["content"]
