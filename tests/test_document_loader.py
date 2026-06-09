@@ -1,9 +1,12 @@
+import fitz
+
 from insurance_rag.config import AppConfig
 from insurance_rag.document_loader import (
     PageExtraction,
     garbled_ratio,
     needs_ocr,
     normalize_page_text,
+    parse_pdf_bytes,
 )
 
 
@@ -32,3 +35,20 @@ def test_normalize_page_text_returns_quality_note_for_ocr():
     assert page.text == "等待期 是 90 天"
     assert page.extraction_method == "ocr"
     assert "该页来自 OCR 识别，可能有误。" in page.quality_notes
+
+
+def test_parse_pdf_bytes_extracts_text_from_in_memory_pdf():
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Waiting period is 90 days")
+    pdf_bytes = document.tobytes()
+    document.close()
+    config = AppConfig(openai_api_key=None, ocr_enabled=False)
+
+    result = parse_pdf_bytes(pdf_bytes, r"C:\uploads\policy.pdf", config)
+
+    assert result.filename == "policy.pdf"
+    assert len(result.pages) == 1
+    assert result.pages[0].page_number == 1
+    assert "Waiting period is 90 days" in result.pages[0].text
+    assert result.pages[0].extraction_method == "text"

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 import fitz
 
@@ -60,14 +59,12 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
     warnings: list[str] = []
     pages: list[DocumentPage] = []
 
-    with NamedTemporaryFile(suffix=".pdf", delete=True) as temp_file:
-        temp_file.write(pdf_bytes)
-        temp_file.flush()
-        try:
-            document = fitz.open(temp_file.name)
-        except Exception as exc:
-            raise ValueError("PDF 无法打开，文件可能已加密、损坏或格式不受支持。") from exc
+    try:
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as exc:
+        raise ValueError("PDF 无法打开，文件可能已加密、损坏或格式不受支持。") from exc
 
+    with document:
         for index, page in enumerate(document, start=1):
             raw_text = page.get_text("text")
             method = "text"
