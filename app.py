@@ -26,6 +26,14 @@ def init_state() -> None:
     st.session_state.setdefault("policy_chunks", ())
 
 
+def clear_policy_state() -> None:
+    st.session_state.parse_result = None
+    st.session_state.policy_index = None
+    st.session_state.embedder = None
+    st.session_state.messages = []
+    st.session_state.policy_chunks = ()
+
+
 def render_citations(payload: AnswerPayload) -> None:
     for warning in payload.warnings:
         st.warning(warning)
@@ -47,6 +55,8 @@ def render_citations(payload: AnswerPayload) -> None:
 
 
 def process_upload(uploaded_file, config: AppConfig) -> None:
+    clear_policy_state()
+
     if not config.openai_api_key:
         st.error("缺少 OPENAI_API_KEY。请先在本地环境变量中配置 OpenAI API key。")
         return
@@ -55,7 +65,11 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
     pdf_bytes = uploaded_file.getvalue()
 
     progress.progress(20, text="解析 PDF 文本，必要时使用 OCR")
-    parse_result = parse_pdf_bytes(pdf_bytes, uploaded_file.name, config)
+    try:
+        parse_result = parse_pdf_bytes(pdf_bytes, uploaded_file.name, config)
+    except Exception as exc:
+        st.error(f"解析 PDF 时出错：{exc}")
+        return
 
     progress.progress(50, text="生成检索片段")
     chunks = chunk_pages(
@@ -67,16 +81,18 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
     )
     if not chunks:
         st.session_state.parse_result = parse_result
-        st.session_state.policy_chunks = ()
-        st.session_state.policy_index = None
-        st.session_state.embedder = None
-        st.session_state.messages = []
         st.error("这份 PDF 没有生成可检索的文本片段。请确认文件包含可读取的保单文字。")
         return
 
     progress.progress(75, text="生成 embeddings 并建立临时索引")
-    embedder = OpenAIEmbedder(api_key=config.openai_api_key, model=config.embedding_model)
-    policy_index = build_index(chunks, embedder)
+    try:
+        embedder = OpenAIEmbedder(api_key=config.openai_api_key, model=config.embedding_model)
+        policy_index = build_index(chunks, embedder)
+    except Exception as exc:
+        st.session_state.parse_result = parse_result
+        st.session_state.policy_chunks = chunks
+        st.error(f"建立检索索引时出错：{exc}")
+        return
 
     st.session_state.parse_result = parse_result
     st.session_state.policy_chunks = chunks
@@ -147,7 +163,7 @@ def main() -> None:
                     )
                     payload = chain.answer(question)
                 except Exception as exc:
-                    payload = AnswerPayload(answer=f"处理问题时出错：{exc}")
+                    payload = AnswerPayload(answer="处理问题时出错。", warnings=(str(exc),))
                 st.write(payload.answer)
                 render_citations(payload)
         st.session_state.messages.append(
