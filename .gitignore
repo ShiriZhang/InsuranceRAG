@@ -1,0 +1,12 @@
+documents/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.streamlit/secrets.toml
+.env
+.venv/
+venv/
+tmp/
+temp/
+.insurance_rag_tmp/
