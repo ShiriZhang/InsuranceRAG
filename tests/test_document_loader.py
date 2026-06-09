@@ -52,3 +52,30 @@ def test_parse_pdf_bytes_extracts_text_from_in_memory_pdf():
     assert result.pages[0].page_number == 1
     assert "Waiting period is 90 days" in result.pages[0].text
     assert result.pages[0].extraction_method == "text"
+
+
+def test_parse_pdf_bytes_keeps_text_pages_when_ocr_runtime_fails(mocker):
+    document = fitz.open()
+    first_page = document.new_page()
+    first_page.insert_text((72, 72), "A")
+    second_page = document.new_page()
+    second_page.insert_text((72, 72), "B")
+    pdf_bytes = document.tobytes()
+    document.close()
+    mocker.patch(
+        "insurance_rag.document_loader._ocr_page",
+        side_effect=ValueError("tesseract runtime failed"),
+    )
+    config = AppConfig(openai_api_key=None, min_page_text_chars=20, ocr_enabled=True)
+
+    result = parse_pdf_bytes(pdf_bytes, "policy.pdf", config)
+
+    assert len(result.pages) == 2
+    assert len(result.warnings) == 1
+    assert "OCR 运行失败" in result.warnings[0]
+    assert "Tesseract" in result.warnings[0]
+    assert "第 1 页" in result.warnings[0]
+    assert result.pages[0].text == "A"
+    assert result.pages[0].extraction_method == "text"
+    assert result.pages[1].text == "B"
+    assert result.pages[1].extraction_method == "text"

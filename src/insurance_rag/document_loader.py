@@ -57,6 +57,7 @@ def _ocr_page(page: fitz.Page) -> str:
 
 def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> ParseResult:
     warnings: list[str] = []
+    warning_keys: set[str] = set()
     pages: list[DocumentPage] = []
 
     try:
@@ -72,8 +73,14 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                 try:
                     raw_text = _ocr_page(page)
                     method = "ocr"
-                except RuntimeError as exc:
-                    warnings.append(str(exc))
+                except Exception as exc:
+                    warning_key = f"ocr_failed:{type(exc).__name__}:{exc}"
+                    if warning_key not in warning_keys:
+                        warnings.append(
+                            f"第 {index} 页 OCR 运行失败，Tesseract 或 OCR 语言数据可能不可用；"
+                            "已保留原始文本提取结果。"
+                        )
+                        warning_keys.add(warning_key)
             pages.append(
                 normalize_page_text(
                     PageExtraction(
