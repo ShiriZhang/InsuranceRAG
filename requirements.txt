@@ -6,3 +6,5 @@ python-dotenv>=1.0
 pydantic>=2.7
 pytest>=8.2
 pytest-mock>=3.14
+Pillow>=10.3
+pytesseract>=0.3
