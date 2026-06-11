@@ -30,6 +30,7 @@ _INSURANCE_TERMS: tuple[str, ...] = (
 
 _ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+_CJK_TOKEN_RE = re.compile(r"^[\u4e00-\u9fff]+$")
 
 
 def tokenize_for_bm25(text: str) -> list[str]:
@@ -141,7 +142,11 @@ class HybridRetriever:
             tokenize_for_bm25(chunk.text) for chunk in self.chunks
         ]
         self._chunk_token_sets = [set(tokens) for tokens in self._tokenized_chunks]
-        self._bm25 = BM25Okapi(self._tokenized_chunks) if self.chunks else None
+        self._bm25 = (
+            BM25Okapi(self._tokenized_chunks)
+            if any(self._tokenized_chunks)
+            else None
+        )
 
     def search(
         self,
@@ -155,19 +160,18 @@ class HybridRetriever:
         query_embeddings = self.embedder.embed_texts(expanded_queries)
         accumulated: dict[str, _AccumulatedResult] = {}
 
-        for query, query_embedding in zip(expanded_queries, query_embeddings):
-            vector_results = self.vector_index.search(query_embedding, top_k)
-            for rank, result in enumerate(vector_results, start=1):
-                merged = self._get_or_create(accumulated, result.chunk)
-                merged.vector_score = _max_optional(merged.vector_score, result.score)
-                merged.add_rank_detail(
-                    query=query,
-                    method="vector",
-                    rank=rank,
-                    score=result.score,
-                    rrf_score=self._rrf_score(rank),
-                )
-
+        for index, query in enumerate(expanded_queries):
+            if index < len(query_embeddings):
+                try:
+                    self._add_vector_results(
+                        accumulated,
+                        query=query,
+                        query_embedding=query_embeddings[index],
+                        top_k=top_k,
+                    )
+                except Exception:
+                    if self.retrieval_mode != "hybrid":
+                        raise
             if self.retrieval_mode == "hybrid":
                 self._add_bm25_results(accumulated, query)
 
@@ -179,6 +183,26 @@ class HybridRetriever:
                 reverse=True,
             )[:top_k]
         ]
+
+    def _add_vector_results(
+        self,
+        accumulated: dict[str, _AccumulatedResult],
+        *,
+        query: str,
+        query_embedding: list[float],
+        top_k: int,
+    ) -> None:
+        vector_results = self.vector_index.search(query_embedding, top_k)
+        for rank, result in enumerate(vector_results, start=1):
+            merged = self._get_or_create(accumulated, result.chunk)
+            merged.vector_score = _max_optional(merged.vector_score, result.score)
+            merged.add_rank_detail(
+                query=query,
+                method="vector",
+                rank=rank,
+                score=result.score,
+                rrf_score=self._rrf_score(rank),
+            )
 
     def _add_bm25_results(
         self,
@@ -206,7 +230,13 @@ class HybridRetriever:
             merged = self._get_or_create(accumulated, chunk)
             merged.bm25_score = _max_optional(merged.bm25_score, score)
             merged.merge_matched_terms(
-                _matched_terms(query_tokens, query_token_set, self._chunk_token_sets[index])
+                _matched_terms(
+                    query_tokens,
+                    query_token_set,
+                    self._chunk_token_sets[index],
+                    query,
+                    chunk.text,
+                )
             )
             merged.add_rank_detail(
                 query=query,
@@ -239,11 +269,49 @@ def _matched_terms(
     query_tokens: list[str],
     query_token_set: set[str],
     chunk_token_set: set[str],
+    query_text: str,
+    chunk_text: str,
 ) -> tuple[str, ...]:
     seen: set[str] = set()
     matched: list[str] = []
     for term in query_tokens:
-        if term in query_token_set and term in chunk_token_set and term not in seen:
+        if (
+            term in query_token_set
+            and term in chunk_token_set
+            and _is_display_matched_term(term, query_text, chunk_text)
+            and term not in seen
+        ):
             seen.add(term)
             matched.append(term)
-    return tuple(matched)
+    return tuple(_remove_subsumed_cjk_terms(matched))
+
+
+def _is_display_matched_term(term: str, query_text: str, chunk_text: str) -> bool:
+    if term in _INSURANCE_TERMS:
+        return True
+    if _ASCII_TOKEN_RE.fullmatch(term):
+        return True
+    return bool(
+        len(term) >= 2
+        and _CJK_TOKEN_RE.fullmatch(term)
+        and term in query_text
+        and term in chunk_text
+    )
+
+
+def _remove_subsumed_cjk_terms(terms: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for term in terms:
+        if not _CJK_TOKEN_RE.fullmatch(term):
+            filtered.append(term)
+            continue
+        if any(
+            term != other
+            and len(term) < len(other)
+            and _CJK_TOKEN_RE.fullmatch(other)
+            and term in other
+            for other in terms
+        ):
+            continue
+        filtered.append(term)
+    return filtered

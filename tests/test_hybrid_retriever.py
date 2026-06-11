@@ -126,3 +126,84 @@ def test_no_expanded_queries_returns_empty_without_calling_embedder():
 
     assert retriever.search(make_rewrite(), top_k=1) == []
     assert embedder.calls == []
+
+
+def test_blank_chunk_does_not_crash_bm25_construction():
+    chunks = (make_chunk("blank", "   \n\t"),)
+    index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0]])
+    embedder = FakeEmbedder([[1.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    results = retriever.search(make_rewrite("保险责任"), top_k=1)
+
+    assert [result.chunk.chunk_id for result in results] == ["blank"]
+    assert results[0].bm25_score is None
+
+
+def test_hybrid_search_keeps_bm25_when_embedder_returns_fewer_embeddings():
+    chunks = (
+        make_chunk("semantic", "普通保障说明，包含常见理赔流程。"),
+        make_chunk("exact", "本产品明确列出投保人豁免的适用条件。"),
+        make_chunk("other-1", "等待期和生效日另有约定。"),
+        make_chunk("other-2", "保险金额以保险单载明为准。"),
+    )
+    index = InMemoryVectorIndex.from_embeddings(
+        chunks,
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ],
+    )
+    embedder = FakeEmbedder([[1.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    results = retriever.search(make_rewrite("普通保障", "投保人豁免"), top_k=3)
+
+    exact = next(result for result in results if result.chunk.chunk_id == "exact")
+    assert exact.bm25_score is not None
+    assert any(
+        detail.method == "bm25" and detail.query == "投保人豁免"
+        for detail in exact.rank_details
+    )
+
+
+def test_hybrid_search_continues_bm25_when_vector_search_fails():
+    chunks = (
+        make_chunk("exact", "本产品明确列出投保人豁免的适用条件。"),
+        make_chunk("other-1", "等待期和生效日另有约定。"),
+        make_chunk("other-2", "保险金额以保险单载明为准。"),
+        make_chunk("other-3", "责任免除条款另见合同。"),
+    )
+    index = InMemoryVectorIndex.from_embeddings(
+        chunks,
+        [[1.0, 0.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+    )
+    embedder = FakeEmbedder([[1.0, 0.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    results = retriever.search(make_rewrite("投保人豁免"), top_k=1)
+
+    assert [result.chunk.chunk_id for result in results] == ["exact"]
+    assert results[0].vector_score is None
+    assert results[0].bm25_score is not None
+
+
+def test_matched_terms_excludes_single_character_cjk_display_terms():
+    chunks = (
+        make_chunk("exact", "投保人豁免 ABC 保障适用。"),
+        make_chunk("other-1", "等待期和生效日另有约定。"),
+        make_chunk("other-2", "保险金额以保险单载明为准。"),
+        make_chunk("other-3", "责任免除条款另见合同。"),
+    )
+    index = InMemoryVectorIndex.from_embeddings(
+        chunks,
+        [[1.0, 0.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+    )
+    embedder = FakeEmbedder([[1.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    results = retriever.search(make_rewrite("投保人豁免 ABC 保障"), top_k=1)
+
+    assert results[0].matched_terms == ("投保人豁免", "ABC", "保障")
