@@ -24,6 +24,18 @@ _FINAL_CLAIM_DECISION_TERMS = (
     "不会赔",
     "保险公司必须",
 )
+_SAFE_FINAL_CLAIM_PREFIXES = (
+    "不能直接判断",
+    "不能判断",
+    "无法判断",
+    "不应写",
+    "不能写",
+    "不要写",
+    "不能说",
+    "不应说",
+    "避免说",
+)
+_FINAL_CLAIM_PREFIX_WINDOW = 8
 _SOURCE_CONFUSING_TERMS = (
     "你的保单",
     "这份保单写明",
@@ -44,7 +56,7 @@ def check_answer(
             block_reason="回答包含具体保单事实，但没有用户保单引用。",
         )
 
-    if _contains_any(answer, _FINAL_CLAIM_DECISION_TERMS):
+    if _contains_final_claim_decision(answer):
         return AnswerGuardResult(
             status=GuardStatus.BLOCK,
             block_reason="回答包含最终理赔判断，需改为基于条款的条件性说明。",
@@ -75,3 +87,22 @@ def check_answer(
 
 def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
+
+
+def _contains_final_claim_decision(text: str) -> bool:
+    for term in _FINAL_CLAIM_DECISION_TERMS:
+        start = 0
+        while True:
+            index = text.find(term, start)
+            if index == -1:
+                break
+            if not _has_safe_final_claim_prefix(text, index):
+                return True
+            start = index + len(term)
+    return False
+
+
+def _has_safe_final_claim_prefix(text: str, term_index: int) -> bool:
+    prefix_start = max(0, term_index - _FINAL_CLAIM_PREFIX_WINDOW)
+    prefix = text[prefix_start:term_index]
+    return any(safe_prefix in prefix for safe_prefix in _SAFE_FINAL_CLAIM_PREFIXES)

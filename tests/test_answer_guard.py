@@ -62,6 +62,47 @@ def test_blocks_final_claim_decision():
     assert "最终理赔判断" in result.block_reason
 
 
+def test_allows_cautionary_phrase_around_certain_non_payment():
+    result = check(
+        "不能直接判断一定不赔，应核对免责条款。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
+def test_allows_cautionary_phrase_around_insurer_must_pay():
+    result = check(
+        "不应写保险公司必须赔，应以保险公司和合同原文为准。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
+def test_allows_cautionary_phrase_around_certain_payment():
+    result = check(
+        "不能说肯定赔，需要结合事故事实和条款。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
+def test_still_blocks_direct_final_claim_decision():
+    result = check(
+        "这种情况一定赔。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "最终理赔判断" in result.block_reason
+
+
 def test_warns_when_builtin_context_may_be_treated_as_policy():
     result = check(
         "你的保单写明住院医疗费用通常属于保障范围。",
