@@ -70,11 +70,7 @@ def test_config_reads_environment(monkeypatch):
 
 
 def test_retrieval_quality_config_defaults(monkeypatch):
-    monkeypatch.delenv("INSURANCE_RAG_RETRIEVAL_MODE", raising=False)
-    monkeypatch.delenv("INSURANCE_RAG_RRF_K", raising=False)
-    monkeypatch.delenv("INSURANCE_RAG_QUERY_REWRITE_LLM", raising=False)
-    monkeypatch.delenv("INSURANCE_RAG_ANSWER_GUARD_LLM", raising=False)
-    monkeypatch.delenv("INSURANCE_RAG_EVAL_REPORT_DIR", raising=False)
+    clear_config_env(monkeypatch)
 
     config = AppConfig.from_env()
 
@@ -86,6 +82,7 @@ def test_retrieval_quality_config_defaults(monkeypatch):
 
 
 def test_retrieval_quality_config_from_env(monkeypatch):
+    clear_config_env(monkeypatch)
     monkeypatch.setenv("INSURANCE_RAG_RETRIEVAL_MODE", "vector")
     monkeypatch.setenv("INSURANCE_RAG_RRF_K", "25")
     monkeypatch.setenv("INSURANCE_RAG_QUERY_REWRITE_LLM", "true")

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ class Citation:
     quality_notes: tuple[str, ...] = ()
 
 
-class GuardStatus(StrEnum):
+class GuardStatus(str, Enum):
     PASS = "pass"
     WARN = "warn"
     BLOCK = "block"
