@@ -12,6 +12,11 @@ CONFIG_ENV_VARS = (
     "INSURANCE_RAG_MIN_PAGE_TEXT_CHARS",
     "INSURANCE_RAG_MAX_GARBLED_RATIO",
     "INSURANCE_RAG_OCR_ENABLED",
+    "INSURANCE_RAG_RETRIEVAL_MODE",
+    "INSURANCE_RAG_RRF_K",
+    "INSURANCE_RAG_QUERY_REWRITE_LLM",
+    "INSURANCE_RAG_ANSWER_GUARD_LLM",
+    "INSURANCE_RAG_EVAL_REPORT_DIR",
 )
 
 
@@ -62,3 +67,35 @@ def test_config_reads_environment(monkeypatch):
     assert config.min_page_text_chars == 100
     assert config.max_garbled_ratio == 0.5
     assert config.ocr_enabled is False
+
+
+def test_retrieval_quality_config_defaults(monkeypatch):
+    monkeypatch.delenv("INSURANCE_RAG_RETRIEVAL_MODE", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_RRF_K", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_QUERY_REWRITE_LLM", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_ANSWER_GUARD_LLM", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_EVAL_REPORT_DIR", raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.retrieval_mode == "hybrid"
+    assert config.rrf_k == 60
+    assert config.query_rewrite_llm is False
+    assert config.answer_guard_llm is False
+    assert config.eval_report_dir == "eval_reports"
+
+
+def test_retrieval_quality_config_from_env(monkeypatch):
+    monkeypatch.setenv("INSURANCE_RAG_RETRIEVAL_MODE", "vector")
+    monkeypatch.setenv("INSURANCE_RAG_RRF_K", "25")
+    monkeypatch.setenv("INSURANCE_RAG_QUERY_REWRITE_LLM", "true")
+    monkeypatch.setenv("INSURANCE_RAG_ANSWER_GUARD_LLM", "yes")
+    monkeypatch.setenv("INSURANCE_RAG_EVAL_REPORT_DIR", "custom_reports")
+
+    config = AppConfig.from_env()
+
+    assert config.retrieval_mode == "vector"
+    assert config.rrf_k == 25
+    assert config.query_rewrite_llm is True
+    assert config.answer_guard_llm is True
+    assert config.eval_report_dir == "custom_reports"
