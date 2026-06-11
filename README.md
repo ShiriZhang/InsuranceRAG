@@ -40,7 +40,13 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 $env:OPENAI_API_KEY="your-api-key"
 ```
 
-使用 OpenAI API 时，上传和索引阶段抽取出的保单文本片段会发送给 OpenAI 用于生成 embeddings；回答生成阶段，用户问题和被检索到的保单片段会发送给 OpenAI chat model。
+使用 OpenAI API 时，请注意以下数据流：
+
+- 上传和索引阶段，抽取出的用户保单文本片段会发送给 OpenAI，用于生成 embeddings。
+- 检索阶段，用户问题会发送给 OpenAI，用于生成 query embedding。
+- 回答生成阶段，用户问题和被检索到的文本片段会发送给 OpenAI chat model。
+- 如果本地存在 `documents/`，且用户问题触发了内置背景支持，选中的内置资料库文本片段也可能发送给 OpenAI 用于生成 embeddings，并可能作为明确标注的背景上下文参与回答。
+- `documents/` 仍由 Git 忽略，不会上传到 GitHub，也不应提交到仓库。
 
 ## OCR 说明
 
