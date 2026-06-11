@@ -158,6 +158,13 @@ class HybridRetriever:
 
         expanded_queries = list(rewrite.expanded_queries)
         query_embeddings = self.embedder.embed_texts(expanded_queries)
+        if (
+            self.retrieval_mode == "vector"
+            and len(query_embeddings) != len(expanded_queries)
+        ):
+            raise ValueError(
+                "Embedding count must match expanded query count in vector mode."
+            )
         accumulated: dict[str, _AccumulatedResult] = {}
 
         for index, query in enumerate(expanded_queries):
@@ -169,7 +176,7 @@ class HybridRetriever:
                         query_embedding=query_embeddings[index],
                         top_k=top_k,
                     )
-                except Exception:
+                except ValueError:
                     if self.retrieval_mode != "hybrid":
                         raise
             if self.retrieval_mode == "hybrid":

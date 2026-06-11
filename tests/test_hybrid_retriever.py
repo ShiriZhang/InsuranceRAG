@@ -1,6 +1,18 @@
+import pytest
+
 from insurance_rag.hybrid_retriever import HybridRetriever, tokenize_for_bm25
 from insurance_rag.models import DocumentChunk, QueryRewriteResult
 from insurance_rag.retriever import InMemoryVectorIndex
+
+
+WAITING_PERIOD = "\u7b49\u5f85\u671f"
+EXCLUSION = "\u8d23\u4efb\u514d\u9664"
+COVERAGE = "\u4fdd\u9669\u8d23\u4efb"
+CRITICAL_ILLNESS = "\u91cd\u5927\u75be\u75c5"
+WAIVER = "\u6295\u4fdd\u4eba\u8c41\u514d"
+EFFECTIVE_DATE = "\u751f\u6548\u65e5"
+INSURED_AMOUNT = "\u4fdd\u9669\u91d1\u989d"
+PROTECTION = "\u4fdd\u969c"
 
 
 def make_chunk(chunk_id: str, text: str) -> DocumentChunk:
@@ -8,7 +20,7 @@ def make_chunk(chunk_id: str, text: str) -> DocumentChunk:
         chunk_id=chunk_id,
         text=text,
         page_number=1,
-        section_title="保险责任",
+        section_title=COVERAGE,
         source_type="user_policy",
         source_name="user.pdf",
         extraction_method="text",
@@ -25,6 +37,11 @@ class FakeEmbedder:
         return self.embeddings[: len(texts)]
 
 
+class RuntimeErrorVectorIndex:
+    def search(self, query_embedding: list[float], top_k: int):
+        raise RuntimeError("unexpected vector failure")
+
+
 def make_rewrite(*expanded_queries: str) -> QueryRewriteResult:
     return QueryRewriteResult(
         original_query=expanded_queries[0] if expanded_queries else "",
@@ -33,23 +50,23 @@ def make_rewrite(*expanded_queries: str) -> QueryRewriteResult:
 
 
 def test_tokenize_for_bm25_keeps_insurance_terms_and_cjk_bigrams():
-    tokens = tokenize_for_bm25("等待期90天 ABC123 责任免除")
+    tokens = tokenize_for_bm25(f"{WAITING_PERIOD}90\u5929 ABC123 {EXCLUSION}")
 
-    assert "等待期" in tokens
-    assert "责任免除" in tokens
+    assert WAITING_PERIOD in tokens
+    assert EXCLUSION in tokens
     assert "ABC123" in tokens
-    assert "等" in tokens
-    assert "待" in tokens
-    assert "等待" in tokens
-    assert "待期" in tokens
+    assert "\u7b49" in tokens
+    assert "\u5f85" in tokens
+    assert "\u7b49\u5f85" in tokens
+    assert "\u5f85\u671f" in tokens
 
 
 def test_hybrid_search_uses_bm25_to_recover_exact_term():
     chunks = (
-        make_chunk("semantic", "普通保障说明，包含常见理赔流程。"),
-        make_chunk("exact", "本产品明确列出投保人豁免的适用条件。"),
-        make_chunk("other-1", "等待期和生效日另有约定。"),
-        make_chunk("other-2", "保险金额以保险单载明为准。"),
+        make_chunk("semantic", "\u666e\u901a\u4fdd\u969c\u8bf4\u660e"),
+        make_chunk("exact", f"\u672c\u4ea7\u54c1\u660e\u786e\u5217\u51fa{WAIVER}\u7684\u9002\u7528\u6761\u4ef6"),
+        make_chunk("other-1", f"{WAITING_PERIOD}\u548c{EFFECTIVE_DATE}\u53e6\u6709\u7ea6\u5b9a"),
+        make_chunk("other-2", f"{INSURED_AMOUNT}\u4ee5\u4fdd\u9669\u5355\u8f7d\u660e\u4e3a\u51c6"),
     )
     index = InMemoryVectorIndex.from_embeddings(
         chunks,
@@ -63,12 +80,12 @@ def test_hybrid_search_uses_bm25_to_recover_exact_term():
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder, rrf_k=1)
 
-    results = retriever.search(make_rewrite("投保人豁免"), top_k=2)
+    results = retriever.search(make_rewrite(WAIVER), top_k=2)
 
     assert [result.chunk.chunk_id for result in results] == ["exact", "semantic"]
     assert results[0].bm25_score is not None
     assert results[0].vector_score is not None
-    assert "投保人豁免" in results[0].matched_terms
+    assert WAIVER in results[0].matched_terms
     assert {detail.method for detail in results[0].rank_details} == {"vector", "bm25"}
     explanation = results[0].to_explanation()
     assert explanation.source_name == "user.pdf"
@@ -78,14 +95,14 @@ def test_hybrid_search_uses_bm25_to_recover_exact_term():
 
 def test_hybrid_search_deduplicates_chunks_across_queries():
     chunks = (
-        make_chunk("a", "保险责任包括重大疾病保障。"),
-        make_chunk("b", "等待期后按条款赔付。"),
+        make_chunk("a", f"{COVERAGE}\u5305\u62ec{CRITICAL_ILLNESS}\u4fdd\u969c"),
+        make_chunk("b", f"{WAITING_PERIOD}\u540e\u6309\u6761\u6b3e\u8d54\u4ed8"),
     )
     index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0], [0.0, 1.0]])
     embedder = FakeEmbedder([[1.0, 0.0], [1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
 
-    results = retriever.search(make_rewrite("保险责任", "重大疾病"), top_k=2)
+    results = retriever.search(make_rewrite(COVERAGE, CRITICAL_ILLNESS), top_k=2)
 
     assert [result.chunk.chunk_id for result in results].count("a") == 1
     assert len(results) == 2
@@ -94,32 +111,45 @@ def test_hybrid_search_deduplicates_chunks_across_queries():
 
 def test_vector_mode_skips_bm25_scores():
     chunks = (
-        make_chunk("a", "保险责任包括重大疾病保障。"),
-        make_chunk("b", "等待期后按条款赔付。"),
+        make_chunk("a", f"{COVERAGE}\u5305\u62ec{CRITICAL_ILLNESS}\u4fdd\u969c"),
+        make_chunk("b", f"{WAITING_PERIOD}\u540e\u6309\u6761\u6b3e\u8d54\u4ed8"),
     )
     index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0], [0.0, 1.0]])
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder, retrieval_mode="vector")
 
-    results = retriever.search(make_rewrite("等待期"), top_k=2)
+    results = retriever.search(make_rewrite(WAITING_PERIOD), top_k=2)
 
     assert all(result.bm25_score is None for result in results)
     assert all(result.matched_terms == () for result in results)
     assert {detail.method for result in results for detail in result.rank_details} == {"vector"}
 
 
+def test_vector_mode_embedding_count_mismatch_raises_value_error():
+    chunks = (
+        make_chunk("a", "alpha coverage"),
+        make_chunk("b", "beta waiting period"),
+    )
+    index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0], [0.0, 1.0]])
+    embedder = FakeEmbedder([[1.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder, retrieval_mode="vector")
+
+    with pytest.raises(ValueError, match="Embedding count"):
+        retriever.search(make_rewrite("alpha", "beta"), top_k=2)
+
+
 def test_top_k_less_than_one_returns_empty():
-    chunks = (make_chunk("a", "保险责任包括重大疾病保障。"),)
+    chunks = (make_chunk("a", f"{COVERAGE}\u5305\u62ec{CRITICAL_ILLNESS}\u4fdd\u969c"),)
     index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0]])
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
 
-    assert retriever.search(make_rewrite("保险责任"), top_k=0) == []
+    assert retriever.search(make_rewrite(COVERAGE), top_k=0) == []
     assert embedder.calls == []
 
 
 def test_no_expanded_queries_returns_empty_without_calling_embedder():
-    chunks = (make_chunk("a", "保险责任包括重大疾病保障。"),)
+    chunks = (make_chunk("a", f"{COVERAGE}\u5305\u62ec{CRITICAL_ILLNESS}\u4fdd\u969c"),)
     index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0]])
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
@@ -134,7 +164,7 @@ def test_blank_chunk_does_not_crash_bm25_construction():
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
 
-    results = retriever.search(make_rewrite("保险责任"), top_k=1)
+    results = retriever.search(make_rewrite(COVERAGE), top_k=1)
 
     assert [result.chunk.chunk_id for result in results] == ["blank"]
     assert results[0].bm25_score is None
@@ -142,10 +172,10 @@ def test_blank_chunk_does_not_crash_bm25_construction():
 
 def test_hybrid_search_keeps_bm25_when_embedder_returns_fewer_embeddings():
     chunks = (
-        make_chunk("semantic", "普通保障说明，包含常见理赔流程。"),
-        make_chunk("exact", "本产品明确列出投保人豁免的适用条件。"),
-        make_chunk("other-1", "等待期和生效日另有约定。"),
-        make_chunk("other-2", "保险金额以保险单载明为准。"),
+        make_chunk("semantic", "\u666e\u901a\u4fdd\u969c\u8bf4\u660e"),
+        make_chunk("exact", f"\u672c\u4ea7\u54c1\u660e\u786e\u5217\u51fa{WAIVER}\u7684\u9002\u7528\u6761\u4ef6"),
+        make_chunk("other-1", f"{WAITING_PERIOD}\u548c{EFFECTIVE_DATE}\u53e6\u6709\u7ea6\u5b9a"),
+        make_chunk("other-2", f"{INSURED_AMOUNT}\u4ee5\u4fdd\u9669\u5355\u8f7d\u660e\u4e3a\u51c6"),
     )
     index = InMemoryVectorIndex.from_embeddings(
         chunks,
@@ -159,22 +189,22 @@ def test_hybrid_search_keeps_bm25_when_embedder_returns_fewer_embeddings():
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
 
-    results = retriever.search(make_rewrite("普通保障", "投保人豁免"), top_k=3)
+    results = retriever.search(make_rewrite("\u666e\u901a\u4fdd\u969c", WAIVER), top_k=3)
 
     exact = next(result for result in results if result.chunk.chunk_id == "exact")
     assert exact.bm25_score is not None
     assert any(
-        detail.method == "bm25" and detail.query == "投保人豁免"
+        detail.method == "bm25" and detail.query == WAIVER
         for detail in exact.rank_details
     )
 
 
 def test_hybrid_search_continues_bm25_when_vector_search_fails():
     chunks = (
-        make_chunk("exact", "本产品明确列出投保人豁免的适用条件。"),
-        make_chunk("other-1", "等待期和生效日另有约定。"),
-        make_chunk("other-2", "保险金额以保险单载明为准。"),
-        make_chunk("other-3", "责任免除条款另见合同。"),
+        make_chunk("exact", f"\u672c\u4ea7\u54c1\u660e\u786e\u5217\u51fa{WAIVER}\u7684\u9002\u7528\u6761\u4ef6"),
+        make_chunk("other-1", f"{WAITING_PERIOD}\u548c{EFFECTIVE_DATE}\u53e6\u6709\u7ea6\u5b9a"),
+        make_chunk("other-2", f"{INSURED_AMOUNT}\u4ee5\u4fdd\u9669\u5355\u8f7d\u660e\u4e3a\u51c6"),
+        make_chunk("other-3", f"{EXCLUSION}\u6761\u6b3e\u53e6\u89c1\u5408\u540c"),
     )
     index = InMemoryVectorIndex.from_embeddings(
         chunks,
@@ -183,19 +213,33 @@ def test_hybrid_search_continues_bm25_when_vector_search_fails():
     embedder = FakeEmbedder([[1.0, 0.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
 
-    results = retriever.search(make_rewrite("投保人豁免"), top_k=1)
+    results = retriever.search(make_rewrite(WAIVER), top_k=1)
 
     assert [result.chunk.chunk_id for result in results] == ["exact"]
     assert results[0].vector_score is None
     assert results[0].bm25_score is not None
 
 
+def test_hybrid_search_propagates_unexpected_vector_errors():
+    chunks = (
+        make_chunk("exact", "exactterm coverage applies"),
+        make_chunk("other-1", "waiting period details"),
+        make_chunk("other-2", "coverage amount details"),
+        make_chunk("other-3", "exclusion details"),
+    )
+    embedder = FakeEmbedder([[1.0, 0.0]])
+    retriever = HybridRetriever(chunks, RuntimeErrorVectorIndex(), embedder)
+
+    with pytest.raises(RuntimeError, match="unexpected vector failure"):
+        retriever.search(make_rewrite("exactterm"), top_k=1)
+
+
 def test_matched_terms_excludes_single_character_cjk_display_terms():
     chunks = (
-        make_chunk("exact", "投保人豁免 ABC 保障适用。"),
-        make_chunk("other-1", "等待期和生效日另有约定。"),
-        make_chunk("other-2", "保险金额以保险单载明为准。"),
-        make_chunk("other-3", "责任免除条款另见合同。"),
+        make_chunk("exact", f"{WAIVER} ABC {PROTECTION}\u9002\u7528"),
+        make_chunk("other-1", f"{WAITING_PERIOD}\u548c{EFFECTIVE_DATE}\u53e6\u6709\u7ea6\u5b9a"),
+        make_chunk("other-2", f"{INSURED_AMOUNT}\u4ee5\u4fdd\u9669\u5355\u8f7d\u660e\u4e3a\u51c6"),
+        make_chunk("other-3", f"{EXCLUSION}\u6761\u6b3e\u53e6\u89c1\u5408\u540c"),
     )
     index = InMemoryVectorIndex.from_embeddings(
         chunks,
@@ -204,6 +248,6 @@ def test_matched_terms_excludes_single_character_cjk_display_terms():
     embedder = FakeEmbedder([[1.0, 0.0]])
     retriever = HybridRetriever(chunks, index, embedder)
 
-    results = retriever.search(make_rewrite("投保人豁免 ABC 保障"), top_k=1)
+    results = retriever.search(make_rewrite(f"{WAIVER} ABC {PROTECTION}"), top_k=1)
 
-    assert results[0].matched_terms == ("投保人豁免", "ABC", "保障")
+    assert results[0].matched_terms == (WAIVER, "ABC", PROTECTION)
