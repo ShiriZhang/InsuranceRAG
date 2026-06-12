@@ -1,7 +1,10 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from insurance_rag.evaluation import (
     DeterministicEvalEmbedder,
@@ -27,7 +30,7 @@ def test_deterministic_embedder_returns_stable_eight_dimensional_vectors():
 
 
 def test_synthetic_evaluation_reports_expected_sections_and_passes_cases():
-    report = evaluate_synthetic_cases(CASES_PATH)
+    report = evaluate_synthetic_cases(CASES_PATH, max_expected_rank=1)
 
     assert report.total_cases == 2
     assert report.passed_cases >= 1
@@ -39,6 +42,67 @@ def test_synthetic_evaluation_reports_expected_sections_and_passes_cases():
     assert "责任免除" in results_by_id["synthetic_exclusion"].retrieved_sections
     assert all(result.retrieved_chunk_ids for result in report.results)
     assert all(result.top_fusion_score > 0 for result in report.results)
+    assert all(result.expected_rank == 1 for result in report.results)
+
+
+def test_synthetic_evaluation_fails_when_expected_evidence_is_after_max_rank():
+    cases_path = _write_cases(
+        "rank-sensitive",
+        [
+            {
+                "case_id": "rank_sensitive_case",
+                "question": "alpha alpha alpha beta",
+                "expected_section": "Alpha section",
+                "expected_terms": ["alpha"],
+                "chunks": [
+                    {
+                        "chunk_id": "alpha-main",
+                        "section_title": "Alpha section",
+                        "text": "alpha alpha alpha alpha",
+                    },
+                    {
+                        "chunk_id": "beta-main",
+                        "section_title": "Beta section",
+                        "text": "beta",
+                    },
+                ],
+            }
+        ],
+    )
+
+    report = evaluate_synthetic_cases(
+        cases_path,
+        top_k=2,
+        max_expected_rank=1,
+    )
+
+    assert report.total_cases == 1
+    assert report.passed_cases == 0
+    assert report.results[0].passed is False
+    assert report.results[0].expected_rank == 2
+
+
+def test_synthetic_evaluation_rejects_empty_case_file():
+    cases_path = _write_cases("empty", [])
+
+    with pytest.raises(ValueError, match="at least one"):
+        evaluate_synthetic_cases(cases_path)
+
+
+def test_synthetic_evaluation_rejects_malformed_case_with_case_id_and_field():
+    cases_path = _write_cases(
+        "malformed",
+        [
+            {
+                "case_id": "missing_chunks_case",
+                "question": "What is covered?",
+                "expected_section": "Coverage",
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="missing_chunks_case.*chunks"):
+        evaluate_synthetic_cases(cases_path)
 
 
 def test_markdown_report_contains_required_summary_and_status_columns():
@@ -77,6 +141,29 @@ def test_cli_synthetic_writes_report_to_selected_report_dir():
     assert "PASS" in completed.stdout
 
 
+def test_cli_synthetic_returns_one_for_invalid_cases_file():
+    cases_path = _write_cases("cli-empty", [])
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_rag.py",
+            "--synthetic",
+            "--cases",
+            str(cases_path),
+            "--report-dir",
+            str(_repo_tmp_dir("cli-empty-report")),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "at least one" in completed.stderr
+
+
 def test_cli_missing_local_documents_prints_skip_message():
     workspace_tmp = _repo_tmp_dir("missing-local-documents")
     missing_path = workspace_tmp / "missing_docs"
@@ -104,4 +191,10 @@ def test_cli_missing_local_documents_prints_skip_message():
 def _repo_tmp_dir(name: str) -> Path:
     path = ROOT / "tmp" / "eval-tests" / f"{name}-{uuid4().hex}"
     path.mkdir(parents=True, exist_ok=False)
+    return path
+
+
+def _write_cases(name: str, cases: list[dict[str, object]]) -> Path:
+    path = _repo_tmp_dir(name) / "cases.json"
+    path.write_text(json.dumps(cases), encoding="utf-8")
     return path

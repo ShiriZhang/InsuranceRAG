@@ -54,7 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     cases_path = args.cases
     if not cases_path.is_absolute():
         cases_path = ROOT / cases_path
-    report = evaluate_synthetic_cases(cases_path)
+    try:
+        report = evaluate_synthetic_cases(cases_path)
+    except ValueError as exc:
+        print(f"Evaluation failed: {exc}", file=sys.stderr)
+        return 1
     markdown = render_markdown_report(report)
     (report_dir / "synthetic_eval_report.md").write_text(markdown, encoding="utf-8")
     print(markdown)
