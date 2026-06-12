@@ -26,8 +26,6 @@ st.set_page_config(page_title="保单解释助手", page_icon="📄", layout="wi
 
 def init_state() -> None:
     st.session_state.setdefault("parse_result", None)
-    st.session_state.setdefault("policy_index", None)
-    st.session_state.setdefault("builtin_index", None)
     st.session_state.setdefault("policy_retriever", None)
     st.session_state.setdefault("builtin_retriever", None)
     st.session_state.setdefault("builtin_index_attempted", False)
@@ -38,8 +36,6 @@ def init_state() -> None:
 
 def clear_policy_state() -> None:
     st.session_state.parse_result = None
-    st.session_state.policy_index = None
-    st.session_state.builtin_index = None
     st.session_state.policy_retriever = None
     st.session_state.builtin_retriever = None
     st.session_state.builtin_index_attempted = False
@@ -134,7 +130,7 @@ def render_retrieval_details(
             if explanation.matched_terms:
                 st.write("匹配词：" + "、".join(explanation.matched_terms))
 
-            for detail in explanation.rank_details:
+            for detail in explanation.rank_details or ():
                 st.caption(
                     f"{detail.method} | rank={detail.rank} | "
                     f"score={detail.score:.4f} | query={detail.query}"
@@ -211,9 +207,7 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
 
     st.session_state.parse_result = parse_result
     st.session_state.policy_chunks = chunks
-    st.session_state.policy_index = policy_index
     st.session_state.policy_retriever = policy_retriever
-    st.session_state.builtin_index = None
     st.session_state.builtin_retriever = None
     st.session_state.builtin_index_attempted = False
     st.session_state.embedder = embedder
