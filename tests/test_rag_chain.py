@@ -1,5 +1,6 @@
-from insurance_rag.models import DocumentChunk
-from insurance_rag.retriever import SearchResult
+from insurance_rag.config import AppConfig
+from insurance_rag.hybrid_retriever import HybridSearchResult
+from insurance_rag.models import DocumentChunk, GuardStatus, QueryRewriteResult
 from insurance_rag.rag_chain import (
     REFUSAL_ANSWER,
     RagChain,
@@ -7,45 +8,56 @@ from insurance_rag.rag_chain import (
     build_messages,
     should_use_builtin_context,
 )
-from insurance_rag.config import AppConfig
 
 
-def make_chunk(source_type: str = "user_policy") -> DocumentChunk:
+def make_chunk(
+    source_type: str = "user_policy",
+    *,
+    chunk_id: str = "c1",
+    quality_notes: tuple[str, ...] = ("扫描件文字可能不完整",),
+) -> DocumentChunk:
     return DocumentChunk(
-        chunk_id="c1",
+        chunk_id=chunk_id,
         text="等待期为九十日。",
         page_number=4,
         section_title="等待期",
         source_type=source_type,
         source_name="user.pdf" if source_type == "user_policy" else "内置条款.pdf",
         extraction_method="text",
-        quality_notes=("扫描件文字可能不完整",),
+        quality_notes=quality_notes,
     )
 
 
-class FakeEmbedder:
-    def __init__(self, embeddings: list[list[float]]) -> None:
-        self.embeddings = embeddings
-
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return self.embeddings
-
-
-class FakeIndex:
+class FakeHybridRetriever:
     def __init__(
         self,
         chunks: list[DocumentChunk] | None = None,
         error: Exception | None = None,
+        matched_terms: tuple[str, ...] = ("等待期",),
     ) -> None:
         self.chunks = chunks or []
         self.error = error
-        self.calls: list[tuple[list[float], int]] = []
+        self.matched_terms = matched_terms
+        self.calls: list[tuple[QueryRewriteResult, int]] = []
 
-    def search(self, query_embedding: list[float], top_k: int) -> list[SearchResult]:
-        self.calls.append((query_embedding, top_k))
+    def search(
+        self,
+        rewrite: QueryRewriteResult,
+        top_k: int,
+    ) -> list[HybridSearchResult]:
+        self.calls.append((rewrite, top_k))
         if self.error:
             raise self.error
-        return [SearchResult(chunk=chunk, score=1.0) for chunk in self.chunks]
+        return [
+            HybridSearchResult(
+                chunk=chunk,
+                final_score=0.05,
+                vector_score=0.8,
+                bm25_score=1.2,
+                matched_terms=self.matched_terms,
+            )
+            for chunk in self.chunks
+        ]
 
 
 class FakeChatClient:
@@ -73,18 +85,16 @@ class FakeChatClient:
 def make_chain(
     monkeypatch,
     *,
-    embedder: FakeEmbedder | None = None,
-    policy_index: FakeIndex | None = None,
-    builtin_index: FakeIndex | None = None,
+    policy_retriever: FakeHybridRetriever | None = None,
+    builtin_retriever: FakeHybridRetriever | None = None,
     chat_client: FakeChatClient | None = None,
 ) -> tuple[RagChain, FakeChatClient]:
     client = chat_client or FakeChatClient()
     monkeypatch.setattr("insurance_rag.rag_chain.OpenAI", lambda api_key: client)
     chain = RagChain(
         config=AppConfig(openai_api_key="test-key", policy_top_k=2, builtin_top_k=1),
-        policy_index=policy_index or FakeIndex([make_chunk()]),
-        builtin_index=builtin_index,
-        embedder=embedder or FakeEmbedder([[1.0, 0.0]]),
+        policy_retriever=policy_retriever or FakeHybridRetriever([make_chunk()]),
+        builtin_retriever=builtin_retriever,
     )
     return chain, client
 
@@ -112,7 +122,7 @@ def test_build_citation_uses_chunk_metadata():
 
 def test_build_citation_normalizes_whitespace_and_truncates():
     chunk = make_chunk()
-    long_text = " 等待期\n\n为\t九十日。 " + "补充说明" * 80
+    long_text = " 等待期\n\n为\t九十日。" + "补充说明" * 80
     chunk = DocumentChunk(
         chunk_id=chunk.chunk_id,
         text=long_text,
@@ -125,7 +135,7 @@ def test_build_citation_normalizes_whitespace_and_truncates():
 
     citation = build_citation(chunk, max_chars=11)
 
-    assert citation.excerpt == "等待期 为 九十日。..."
+    assert citation.excerpt == "等待期 为 九十日。补..."
 
 
 def test_build_messages_include_no_claim_decision_rule():
@@ -145,8 +155,8 @@ def test_answer_policy_first_happy_path_includes_policy_and_builtin_citations(mo
     builtin_chunk = make_chunk(source_type="builtin")
     chain, client = make_chain(
         monkeypatch,
-        policy_index=FakeIndex([policy_chunk]),
-        builtin_index=FakeIndex([builtin_chunk]),
+        policy_retriever=FakeHybridRetriever([policy_chunk]),
+        builtin_retriever=FakeHybridRetriever([builtin_chunk]),
     )
 
     payload = chain.answer("什么是等待期？")
@@ -160,7 +170,7 @@ def test_answer_policy_first_happy_path_includes_policy_and_builtin_citations(mo
 
 
 def test_answer_refuses_when_policy_search_returns_no_results_without_chat(monkeypatch):
-    chain, client = make_chain(monkeypatch, policy_index=FakeIndex([]))
+    chain, client = make_chain(monkeypatch, policy_retriever=FakeHybridRetriever([]))
 
     payload = chain.answer("什么是等待期？")
 
@@ -170,20 +180,10 @@ def test_answer_refuses_when_policy_search_returns_no_results_without_chat(monke
     assert client.calls == []
 
 
-def test_answer_refuses_when_embedding_response_is_empty_with_warning(monkeypatch):
-    chain, client = make_chain(monkeypatch, embedder=FakeEmbedder([]))
-
-    payload = chain.answer("等待期是多少？")
-
-    assert payload.answer == REFUSAL_ANSWER
-    assert any("向量生成失败" in warning for warning in payload.warnings)
-    assert client.calls == []
-
-
-def test_answer_refuses_when_policy_index_search_errors_without_chat(monkeypatch):
+def test_answer_refuses_when_policy_retriever_errors_without_chat(monkeypatch):
     chain, client = make_chain(
         monkeypatch,
-        policy_index=FakeIndex(error=ValueError("dimension mismatch")),
+        policy_retriever=FakeHybridRetriever(error=ValueError("dimension mismatch")),
     )
 
     payload = chain.answer("等待期是多少？")
@@ -193,10 +193,10 @@ def test_answer_refuses_when_policy_index_search_errors_without_chat(monkeypatch
     assert client.calls == []
 
 
-def test_answer_degrades_to_policy_only_when_builtin_index_errors(monkeypatch):
+def test_answer_degrades_to_policy_only_when_builtin_retriever_errors(monkeypatch):
     chain, client = make_chain(
         monkeypatch,
-        builtin_index=FakeIndex(error=ValueError("dimension mismatch")),
+        builtin_retriever=FakeHybridRetriever(error=ValueError("dimension mismatch")),
     )
 
     payload = chain.answer("什么是等待期？")
@@ -207,3 +207,48 @@ def test_answer_degrades_to_policy_only_when_builtin_index_errors(monkeypatch):
     assert any("内置资料库检索失败" in warning for warning in payload.warnings)
     assert len(client.calls) == 1
     assert "内置资料库背景：无" in client.calls[0]["messages"][1]["content"]
+
+
+def test_answer_calls_query_rewriter_and_hybrid_retriever(monkeypatch):
+    policy_retriever = FakeHybridRetriever(
+        [make_chunk(quality_notes=())],
+        matched_terms=("保险责任",),
+    )
+    chain, _ = make_chain(monkeypatch, policy_retriever=policy_retriever)
+
+    payload = chain.answer("这个赔不赔？")
+
+    rewrite, top_k = policy_retriever.calls[0]
+    assert top_k == 2
+    assert rewrite.original_query == "这个赔不赔？"
+    assert "保险责任" in rewrite.expanded_queries
+    assert payload.retrieval_explanations[0].matched_terms == ("保险责任",)
+
+
+def test_answer_guard_block_replaces_model_answer(monkeypatch):
+    chain, _ = make_chain(
+        monkeypatch,
+        policy_retriever=FakeHybridRetriever([make_chunk(quality_notes=())]),
+        chat_client=FakeChatClient(answer="这种情况一定赔。"),
+    )
+
+    payload = chain.answer("这个赔不赔？")
+
+    assert "不能直接给出该结论" in payload.answer
+    assert payload.guard_result is not None
+    assert payload.guard_result.status is GuardStatus.BLOCK
+    assert any("最终理赔判断" in warning for warning in payload.warnings)
+
+
+def test_answer_guard_warn_preserves_model_answer(monkeypatch):
+    chain, _ = make_chain(
+        monkeypatch,
+        policy_retriever=FakeHybridRetriever([make_chunk()]),
+        chat_client=FakeChatClient(answer="根据条款，等待期为九十日。"),
+    )
+
+    payload = chain.answer("等待期是多少？")
+
+    assert payload.answer == "根据条款，等待期为九十日。"
+    assert payload.guard_result is not None
+    assert payload.guard_result.status in {GuardStatus.PASS, GuardStatus.WARN}

@@ -1,8 +1,9 @@
 from openai import OpenAI
 
+from insurance_rag.answer_guard import BLOCKED_ANSWER, check_answer
 from insurance_rag.config import AppConfig
-from insurance_rag.models import AnswerPayload, Citation, DocumentChunk
-from insurance_rag.retriever import InMemoryVectorIndex, OpenAIEmbedder
+from insurance_rag.models import AnswerPayload, Citation, DocumentChunk, GuardStatus
+from insurance_rag.query_rewriter import rewrite_query
 
 
 REFUSAL_ANSWER = "这份保单中没有找到足够明确的依据。你可以换一种问法，或确认上传的保单是否完整。"
@@ -64,47 +65,41 @@ class RagChain:
     def __init__(
         self,
         config: AppConfig,
-        policy_index: InMemoryVectorIndex,
-        embedder: OpenAIEmbedder,
-        builtin_index: InMemoryVectorIndex | None = None,
+        policy_retriever,
+        builtin_retriever=None,
     ) -> None:
         if not config.openai_api_key:
             raise ValueError("缺少 OPENAI_API_KEY。")
         self.config = config
-        self.policy_index = policy_index
-        self.builtin_index = builtin_index
-        self.embedder = embedder
+        self.policy_retriever = policy_retriever
+        self.builtin_retriever = builtin_retriever
         self.client = OpenAI(api_key=config.openai_api_key)
 
     def answer(self, question: str) -> AnswerPayload:
         warnings: list[str] = []
-        query_embeddings = self.embedder.embed_texts([question])
-        if not query_embeddings:
-            return AnswerPayload(
-                answer=REFUSAL_ANSWER,
-                warnings=("向量生成失败：没有返回可用于检索的问题向量。",),
-            )
-        query_embedding = query_embeddings[0]
+        rewrite = rewrite_query(question, use_llm=self.config.query_rewrite_llm)
+        warnings.extend(rewrite.warnings)
 
         try:
-            policy_results = self.policy_index.search(
-                query_embedding,
+            policy_results = self.policy_retriever.search(
+                rewrite,
                 top_k=self.config.policy_top_k,
             )
         except Exception as error:
             return AnswerPayload(
                 answer=REFUSAL_ANSWER,
-                warnings=(f"保单检索失败：{error}",),
+                warnings=tuple(warnings + [f"保单检索失败：{error}"]),
             )
         policy_chunks = [result.chunk for result in policy_results]
         if not policy_chunks:
-            return AnswerPayload(answer=REFUSAL_ANSWER)
+            return AnswerPayload(answer=REFUSAL_ANSWER, warnings=tuple(warnings))
 
+        builtin_results = []
         builtin_chunks: list[DocumentChunk] = []
-        if self.builtin_index and should_use_builtin_context(question, len(policy_chunks)):
+        if self.builtin_retriever and should_use_builtin_context(question, len(policy_chunks)):
             try:
-                builtin_results = self.builtin_index.search(
-                    query_embedding,
+                builtin_results = self.builtin_retriever.search(
+                    rewrite,
                     top_k=self.config.builtin_top_k,
                 )
                 builtin_chunks = [result.chunk for result in builtin_results]
@@ -118,9 +113,29 @@ class RagChain:
             temperature=0.2,
         )
         answer = response.choices[0].message.content or REFUSAL_ANSWER
+        policy_citations = tuple(build_citation(chunk) for chunk in policy_chunks)
+        builtin_citations = tuple(build_citation(chunk) for chunk in builtin_chunks)
+        retrieval_explanations = tuple(
+            result.to_explanation() for result in [*policy_results, *builtin_results]
+        )
+        guard_result = check_answer(
+            question=question,
+            answer=answer,
+            policy_citations=policy_citations,
+            builtin_citations=builtin_citations,
+            retrieval_explanations=retrieval_explanations,
+        )
+        warnings.extend(guard_result.warnings)
+        if guard_result.status is GuardStatus.BLOCK:
+            answer = BLOCKED_ANSWER
+            if guard_result.block_reason:
+                warnings.append(guard_result.block_reason)
+
         return AnswerPayload(
             answer=answer,
-            policy_citations=tuple(build_citation(chunk) for chunk in policy_chunks),
-            builtin_citations=tuple(build_citation(chunk) for chunk in builtin_chunks),
+            policy_citations=policy_citations,
+            builtin_citations=builtin_citations,
             warnings=tuple(warnings),
+            retrieval_explanations=retrieval_explanations,
+            guard_result=guard_result,
         )
