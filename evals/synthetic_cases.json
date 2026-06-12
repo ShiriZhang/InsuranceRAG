@@ -1,0 +1,48 @@
+[
+  {
+    "case_id": "synthetic_waiting_period",
+    "question": "等待期内出险是否可以获得赔付？",
+    "expected_section": "等待期",
+    "expected_terms": ["等待期", "生效", "赔付"],
+    "chunks": [
+      {
+        "chunk_id": "waiting-period-main",
+        "section_title": "等待期",
+        "text": "人工示例：等待期用于说明合同生效后一段观察时间，相关请求需要先判断事故是否发生在等待期内。"
+      },
+      {
+        "chunk_id": "coverage-neighbor",
+        "section_title": "保险责任",
+        "text": "人工示例：保险责任描述在符合条件时可以申请的保障项目和赔付范围。"
+      },
+      {
+        "chunk_id": "exclusion-neighbor",
+        "section_title": "责任免除",
+        "text": "人工示例：责任免除列出不承担保险责任的情形，与等待期判断应分开处理。"
+      }
+    ]
+  },
+  {
+    "case_id": "synthetic_exclusion",
+    "question": "哪些情况属于责任免除而不会赔？",
+    "expected_section": "责任免除",
+    "expected_terms": ["责任免除", "不承担", "不会赔"],
+    "chunks": [
+      {
+        "chunk_id": "exclusion-main",
+        "section_title": "责任免除",
+        "text": "人工示例：责任免除用于说明特定风险或行为导致保险人不承担给付责任。"
+      },
+      {
+        "chunk_id": "waiver-neighbor",
+        "section_title": "豁免保险费",
+        "text": "人工示例：豁免保险费说明满足条件后后续保费可以被免除，但不等同于责任免除。"
+      },
+      {
+        "chunk_id": "period-neighbor",
+        "section_title": "保险期间",
+        "text": "人工示例：保险期间说明合同保障开始和结束的时间边界。"
+      }
+    ]
+  }
+]

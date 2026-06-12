@@ -1,5 +1,8 @@
 documents/
 .worktrees/
+eval_reports/
+.rag_eval_cache
+.rag_eval_cache/
 
 __pycache__/
 *.py[cod]
