@@ -1,8 +1,17 @@
+from typing import Protocol
+
 from openai import OpenAI
 
 from insurance_rag.answer_guard import BLOCKED_ANSWER, check_answer
 from insurance_rag.config import AppConfig
-from insurance_rag.models import AnswerPayload, Citation, DocumentChunk, GuardStatus
+from insurance_rag.hybrid_retriever import HybridSearchResult
+from insurance_rag.models import (
+    AnswerPayload,
+    Citation,
+    DocumentChunk,
+    GuardStatus,
+    QueryRewriteResult,
+)
 from insurance_rag.query_rewriter import rewrite_query
 
 
@@ -61,12 +70,20 @@ def build_messages(
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+class SearchRetriever(Protocol):
+    def search(
+        self,
+        rewrite: QueryRewriteResult,
+        top_k: int,
+    ) -> list[HybridSearchResult]: ...
+
+
 class RagChain:
     def __init__(
         self,
         config: AppConfig,
-        policy_retriever,
-        builtin_retriever=None,
+        policy_retriever: SearchRetriever,
+        builtin_retriever: SearchRetriever | None = None,
     ) -> None:
         if not config.openai_api_key:
             raise ValueError("缺少 OPENAI_API_KEY。")

@@ -243,7 +243,7 @@ def test_answer_guard_block_replaces_model_answer(monkeypatch):
 def test_answer_guard_warn_preserves_model_answer(monkeypatch):
     chain, _ = make_chain(
         monkeypatch,
-        policy_retriever=FakeHybridRetriever([make_chunk()]),
+        policy_retriever=FakeHybridRetriever([make_chunk(quality_notes=())]),
         chat_client=FakeChatClient(answer="根据条款，等待期为九十日。"),
     )
 
@@ -251,4 +251,5 @@ def test_answer_guard_warn_preserves_model_answer(monkeypatch):
 
     assert payload.answer == "根据条款，等待期为九十日。"
     assert payload.guard_result is not None
-    assert payload.guard_result.status in {GuardStatus.PASS, GuardStatus.WARN}
+    assert payload.guard_result.status is GuardStatus.WARN
+    assert any("用户保单引用较少" in warning for warning in payload.warnings)
