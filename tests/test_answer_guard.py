@@ -6,13 +6,15 @@ def citation(
     *,
     source_type: str = "policy",
     quality_notes: tuple[str, ...] = (),
+    section_title: str = "保障责任",
+    excerpt: str = "住院医疗费用按合同约定给付。",
 ) -> Citation:
     return Citation(
         source_type=source_type,
         source_name="sample.pdf",
         page_number=1,
-        section_title="保障责任",
-        excerpt="住院医疗费用按合同约定给付。",
+        section_title=section_title,
+        excerpt=excerpt,
         quality_notes=quality_notes,
     )
 
@@ -51,9 +53,82 @@ def test_blocks_specific_policy_answer_without_user_policy_citation():
     assert "不能直接给出该结论" in BLOCKED_ANSWER
 
 
+def test_blocks_policy_fact_not_supported_by_cited_evidence():
+    result = check(
+        "这份保单的等待期为九十日。",
+        policy_citations=(
+            citation(section_title="保障责任", excerpt="住院医疗费用按合同约定给付。"),
+            citation(section_title="责任免除", excerpt="酒后驾驶属于责任免除。"),
+        ),
+        retrieval_explanations=(explanation(final_score=0.03),),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "未被用户保单引用支持" in result.block_reason
+
+
+def test_allows_policy_fact_supported_by_cited_evidence():
+    result = check(
+        "这份保单写明住院医疗费用按合同约定给付。",
+        policy_citations=(
+            citation(excerpt="住院医疗费用按合同约定给付。"),
+            citation(excerpt="住院医疗费用按合同约定给付。"),
+        ),
+        retrieval_explanations=(explanation(final_score=0.03),),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
 def test_blocks_final_claim_decision():
     result = check(
         "保险公司必须赔付这次住院费用。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "最终理赔判断" in result.block_reason
+
+
+def test_blocks_direct_non_payment_decision():
+    result = check(
+        "根据条款，这种情况不赔。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "最终理赔判断" in result.block_reason
+
+
+def test_blocks_direct_claim_payment_decision():
+    result = check(
+        "根据条款，这次可以理赔。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "最终理赔判断" in result.block_reason
+
+
+def test_blocks_direct_no_reimbursement_decision():
+    result = check(
+        "根据条款，该费用不予赔付。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "最终理赔判断" in result.block_reason
+
+
+def test_blocks_direct_reimbursement_decision():
+    result = check(
+        "该费用可以报销。",
         policy_citations=(citation(), citation()),
     )
 
@@ -85,6 +160,26 @@ def test_allows_cautionary_phrase_around_insurer_must_pay():
 def test_allows_cautionary_phrase_around_certain_payment():
     result = check(
         "不能说肯定赔，需要结合事故事实和条款。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
+def test_allows_cautionary_phrase_around_direct_non_payment():
+    result = check(
+        "不能直接判断不赔，应核对免责条款。",
+        policy_citations=(citation(), citation()),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
+def test_allows_cautionary_phrase_around_claim_payment():
+    result = check(
+        "不能说可以理赔，需要结合事故事实和条款。",
         policy_citations=(citation(), citation()),
     )
 
