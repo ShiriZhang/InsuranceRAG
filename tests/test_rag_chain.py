@@ -253,3 +253,21 @@ def test_answer_guard_warn_preserves_model_answer(monkeypatch):
     assert payload.guard_result is not None
     assert payload.guard_result.status is GuardStatus.WARN
     assert any("用户保单引用较少" in warning for warning in payload.warnings)
+
+
+def test_answer_blocks_model_answer_when_guard_runtime_fails(monkeypatch):
+    def raise_guard_error(**_kwargs):
+        raise RuntimeError("guard crashed")
+
+    monkeypatch.setattr("insurance_rag.rag_chain.check_answer", raise_guard_error)
+    chain, _ = make_chain(
+        monkeypatch,
+        policy_retriever=FakeHybridRetriever([make_chunk(quality_notes=())]),
+        chat_client=FakeChatClient(answer="根据引用，等待期为九十日。"),
+    )
+
+    payload = chain.answer("等待期是多久？")
+
+    assert "不能直接给出该结论" in payload.answer
+    assert payload.guard_result is None
+    assert any("自检未完成" in warning for warning in payload.warnings)

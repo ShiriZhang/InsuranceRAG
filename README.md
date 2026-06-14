@@ -93,6 +93,7 @@ $env:INSURANCE_RAG_RRF_K="60"
 
 - 如果回答陈述了具体保单事实，但没有用户上传保单中的证据支持，系统会阻断该回答。
 - 如果回答使用“肯定赔”“一定不赔”等最终理赔结论式措辞，系统会阻断该回答。
+- 如果回答把内置资料库内容表述成“你的保单写明”的用户保单事实，系统会阻断该回答。
 - 如果引用数量较少、检索分数偏低，或 OCR 质量可能影响条款识别，系统会给出风险提示。
 
 本项目只解释和整理保单条款，不提供法律、医疗、财务、理赔或核保建议，也不替代保险公司、合同原文或专业人士的最终判断。
@@ -111,13 +112,13 @@ python scripts\evaluate_rag.py --synthetic
 
 评测报告会写入 `eval_reports/`，该目录已由 Git 忽略，不应提交到仓库。
 
-如需尝试本地资料库文档对评测的影响，可以运行：
+如需对本地真实 PDF 做不外传数据的检索评测，可以运行：
 
 ```powershell
-python scripts\evaluate_rag.py --synthetic --local-documents documents
+python scripts\evaluate_rag.py --local-documents documents --local-sample-limit 20
 ```
 
-真实本地文档和评测报告都应保留在本地，不要提交到 Git。
+本地文档评测会解析 PDF、统计页数/chunk 数/未识别标题比例，并对“等待期”“责任免除”“保险责任”等精确条款词计算 Top1/Top3 命中。真实本地文档和评测报告都应保留在本地，不要提交到 Git。
 
 ## 免责声明
 

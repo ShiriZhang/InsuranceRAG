@@ -1,5 +1,6 @@
 import pytest
 
+import insurance_rag.hybrid_retriever as hybrid_module
 from insurance_rag.hybrid_retriever import HybridRetriever, tokenize_for_bm25
 from insurance_rag.models import DocumentChunk, QueryRewriteResult
 from insurance_rag.retriever import InMemoryVectorIndex
@@ -93,6 +94,26 @@ def test_hybrid_search_uses_bm25_to_recover_exact_term():
     assert explanation.matched_terms == results[0].matched_terms
 
 
+def test_exact_insurance_term_match_outranks_partial_token_matches():
+    chunks = (
+        make_chunk("partial-1", "保险 责任 保障 范围 " * 20),
+        make_chunk("partial-2", "保单主要保障责任范围，保险费用责任说明 " * 20),
+        make_chunk("exact", "第七条 保险责任 本合同承担重大疾病保险责任。"),
+        make_chunk("partial-3", "保险金额和责任免除另有约定 " * 20),
+    )
+    index = InMemoryVectorIndex.from_embeddings(
+        chunks,
+        [[0.0, 0.0] for _chunk in chunks],
+    )
+    embedder = FakeEmbedder([[0.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    results = retriever.search(make_rewrite(COVERAGE), top_k=3)
+
+    assert results[0].chunk.chunk_id == "exact"
+    assert COVERAGE in results[0].matched_terms
+
+
 def test_hybrid_search_deduplicates_chunks_across_queries():
     chunks = (
         make_chunk("a", f"{COVERAGE}\u5305\u62ec{CRITICAL_ILLNESS}\u4fdd\u969c"),
@@ -167,6 +188,49 @@ def test_blank_chunk_does_not_crash_bm25_construction():
     results = retriever.search(make_rewrite(COVERAGE), top_k=1)
 
     assert [result.chunk.chunk_id for result in results] == ["blank"]
+    assert results[0].bm25_score is None
+
+
+def test_hybrid_search_falls_back_to_vector_when_bm25_construction_fails(monkeypatch):
+    chunks = (
+        make_chunk("semantic", f"{COVERAGE}包括{CRITICAL_ILLNESS}保障"),
+        make_chunk("other", f"{WAITING_PERIOD}后按条款赔付"),
+    )
+    index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0], [0.0, 1.0]])
+    embedder = FakeEmbedder([[1.0, 0.0]])
+
+    def raise_bm25_error(_tokens):
+        raise RuntimeError("bm25 unavailable")
+
+    monkeypatch.setattr(hybrid_module, "BM25Okapi", raise_bm25_error)
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    results = retriever.search(make_rewrite(COVERAGE), top_k=1)
+
+    assert [result.chunk.chunk_id for result in results] == ["semantic"]
+    assert results[0].vector_score is not None
+    assert results[0].bm25_score is None
+
+
+def test_hybrid_search_falls_back_to_vector_when_bm25_search_fails():
+    chunks = (
+        make_chunk("semantic", f"{COVERAGE}包括{CRITICAL_ILLNESS}保障"),
+        make_chunk("other", f"{WAITING_PERIOD}后按条款赔付"),
+    )
+    index = InMemoryVectorIndex.from_embeddings(chunks, [[1.0, 0.0], [0.0, 1.0]])
+    embedder = FakeEmbedder([[1.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, embedder)
+
+    class BrokenBM25:
+        def get_scores(self, _tokens):
+            raise RuntimeError("bm25 search failed")
+
+    retriever._bm25 = BrokenBM25()
+
+    results = retriever.search(make_rewrite(COVERAGE), top_k=1)
+
+    assert [result.chunk.chunk_id for result in results] == ["semantic"]
+    assert results[0].vector_score is not None
     assert results[0].bm25_score is None
 
 

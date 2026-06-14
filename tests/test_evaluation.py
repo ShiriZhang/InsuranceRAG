@@ -4,11 +4,14 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+import fitz
 import pytest
 
 from insurance_rag.evaluation import (
     DeterministicEvalEmbedder,
+    evaluate_local_documents,
     evaluate_synthetic_cases,
+    render_local_markdown_report,
     render_markdown_report,
 )
 
@@ -117,6 +120,26 @@ def test_markdown_report_contains_required_summary_and_status_columns():
     assert "FAIL" in markdown
 
 
+def test_local_document_evaluation_scores_real_pdf_terms():
+    docs_dir = _repo_tmp_dir("local-docs")
+    _write_pdf(
+        docs_dir / "sample.pdf",
+        "第六条 等待期\n等待期为九十日。\n第七条 保险责任\n本合同承担重大疾病保险责任。",
+    )
+
+    report = evaluate_local_documents(docs_dir, sample_limit=1, top_k=3)
+
+    assert report.total_documents == 1
+    assert report.parsed_documents == 1
+    assert report.total_cases >= 2
+    assert report.top3_cases == report.total_cases
+    assert report.unknown_chunk_rate < 1.0
+    markdown = render_local_markdown_report(report)
+    assert "# InsuranceRAG Local Document Evaluation Report" in markdown
+    assert "Top3" in markdown
+    assert "等待期" in markdown
+
+
 def test_cli_synthetic_writes_report_to_selected_report_dir():
     report_dir = _repo_tmp_dir("reports")
 
@@ -188,6 +211,65 @@ def test_cli_missing_local_documents_prints_skip_message():
     assert "Skipping local document evaluation" in completed.stdout
 
 
+def test_cli_explicit_missing_local_documents_returns_one_without_synthetic():
+    workspace_tmp = _repo_tmp_dir("missing-local-documents-only")
+    missing_path = workspace_tmp / "missing_docs"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_rag.py",
+            "--report-dir",
+            str(workspace_tmp / "reports"),
+            "--local-documents",
+            str(missing_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "does not exist" in completed.stdout
+
+
+def test_cli_existing_local_documents_writes_local_report():
+    workspace_tmp = _repo_tmp_dir("existing-local-documents")
+    docs_dir = workspace_tmp / "docs"
+    docs_dir.mkdir()
+    _write_pdf(
+        docs_dir / "sample.pdf",
+        "第六条 等待期\n等待期为九十日。\n第七条 保险责任\n本合同承担重大疾病保险责任。",
+    )
+    report_dir = workspace_tmp / "reports"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_rag.py",
+            "--synthetic",
+            "--report-dir",
+            str(report_dir),
+            "--local-documents",
+            str(docs_dir),
+            "--local-sample-limit",
+            "1",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report_path = report_dir / "local_document_eval_report.md"
+    assert report_path.exists()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "# InsuranceRAG Local Document Evaluation Report" in report_text
+    assert "sample.pdf" in report_text
+
+
 def _repo_tmp_dir(name: str) -> Path:
     path = ROOT / "tmp" / "eval-tests" / f"{name}-{uuid4().hex}"
     path.mkdir(parents=True, exist_ok=False)
@@ -198,3 +280,11 @@ def _write_cases(name: str, cases: list[dict[str, object]]) -> Path:
     path = _repo_tmp_dir(name) / "cases.json"
     path.write_text(json.dumps(cases), encoding="utf-8")
     return path
+
+
+def _write_pdf(path: Path, text: str) -> None:
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text, fontname="china-s", fontsize=11)
+    path.write_bytes(document.tobytes())
+    document.close()

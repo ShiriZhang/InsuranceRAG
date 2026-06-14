@@ -135,18 +135,24 @@ class RagChain:
         retrieval_explanations = tuple(
             result.to_explanation() for result in [*policy_results, *builtin_results]
         )
-        guard_result = check_answer(
-            question=question,
-            answer=answer,
-            policy_citations=policy_citations,
-            builtin_citations=builtin_citations,
-            retrieval_explanations=retrieval_explanations,
-        )
-        warnings.extend(guard_result.warnings)
-        if guard_result.status is GuardStatus.BLOCK:
+        guard_result = None
+        try:
+            guard_result = check_answer(
+                question=question,
+                answer=answer,
+                policy_citations=policy_citations,
+                builtin_citations=builtin_citations,
+                retrieval_explanations=retrieval_explanations,
+            )
+        except Exception as error:
             answer = BLOCKED_ANSWER
-            if guard_result.block_reason:
-                warnings.append(guard_result.block_reason)
+            warnings.append(f"回答自检未完成：{error}")
+        else:
+            warnings.extend(guard_result.warnings)
+            if guard_result.status is GuardStatus.BLOCK:
+                answer = BLOCKED_ANSWER
+                if guard_result.block_reason:
+                    warnings.append(guard_result.block_reason)
 
         return AnswerPayload(
             answer=answer,

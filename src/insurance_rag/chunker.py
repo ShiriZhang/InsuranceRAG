@@ -29,8 +29,8 @@ def _looks_like_heading(normalized_line: str, title: str) -> bool:
 
 
 def infer_section_title(text: str, current_title: str) -> str:
-    first_lines = [line.strip() for line in text.splitlines()[:5] if line.strip()]
-    for line in first_lines:
+    candidate_lines = [line.strip() for line in text.splitlines()[:80] if line.strip()]
+    for line in candidate_lines:
         normalized = re.sub(r"^[第\d一二三四五六七八九十百、\.\s条款章节]+", "", line)
         for title in KNOWN_TITLES:
             if _looks_like_heading(normalized, title):

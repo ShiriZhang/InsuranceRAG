@@ -68,6 +68,50 @@ def test_blocks_policy_fact_not_supported_by_cited_evidence():
     assert "未被用户保单引用支持" in result.block_reason
 
 
+def test_blocks_unsupported_policy_fact_without_trigger_phrase():
+    result = check(
+        "等待期是90天。",
+        policy_citations=(
+            citation(section_title="保险责任", excerpt="本合同保险责任包括重大疾病保险金。"),
+            citation(section_title="责任免除", excerpt="酒后驾驶属于责任免除。"),
+        ),
+        retrieval_explanations=(explanation(final_score=0.03),),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "未被用户保单引用支持" in result.block_reason
+
+
+def test_allows_supported_policy_fact_with_equivalent_chinese_number_unit():
+    result = check(
+        "等待期是90天。",
+        policy_citations=(
+            citation(section_title="等待期", excerpt="本合同等待期为九十日。"),
+            citation(section_title="保险责任", excerpt="等待期后按合同约定承担保险责任。"),
+        ),
+        retrieval_explanations=(explanation(final_score=0.03),),
+    )
+
+    assert result.status is GuardStatus.PASS
+    assert result.warnings == ()
+
+
+def test_blocks_numeric_policy_fact_when_number_belongs_to_different_clause():
+    result = check(
+        "等待期是90天。",
+        policy_citations=(
+            citation(section_title="等待期", excerpt="本合同等待期为30天。"),
+            citation(section_title="保险期间", excerpt="保险期间可至90天。"),
+        ),
+        retrieval_explanations=(explanation(final_score=0.03),),
+    )
+
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "未被用户保单引用支持" in result.block_reason
+
+
 def test_allows_policy_fact_supported_by_cited_evidence():
     result = check(
         "这份保单写明住院医疗费用按合同约定给付。",
@@ -198,16 +242,22 @@ def test_still_blocks_direct_final_claim_decision():
     assert "最终理赔判断" in result.block_reason
 
 
-def test_warns_when_builtin_context_may_be_treated_as_policy():
+def test_blocks_when_builtin_context_is_treated_as_user_policy():
     result = check(
-        "你的保单写明住院医疗费用通常属于保障范围。",
+        "你的保单写明等待期是保险合同生效后的一段观察时间。",
         policy_citations=(citation(), citation()),
-        builtin_citations=(citation(source_type="builtin"),),
+        builtin_citations=(
+            citation(
+                source_type="builtin",
+                section_title="等待期",
+                excerpt="等待期是保险合同生效后的一段观察时间。",
+            ),
+        ),
     )
 
-    assert result.status is GuardStatus.WARN
-    assert any("内置资料库" in warning for warning in result.warnings)
-    assert any("用户保单" in warning for warning in result.warnings)
+    assert result.status is GuardStatus.BLOCK
+    assert result.block_reason is not None
+    assert "内置资料库" in result.block_reason
 
 
 def test_warns_for_low_score_evidence():

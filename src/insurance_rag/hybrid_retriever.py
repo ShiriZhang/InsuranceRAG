@@ -142,11 +142,12 @@ class HybridRetriever:
             tokenize_for_bm25(chunk.text) for chunk in self.chunks
         ]
         self._chunk_token_sets = [set(tokens) for tokens in self._tokenized_chunks]
-        self._bm25 = (
-            BM25Okapi(self._tokenized_chunks)
-            if any(self._tokenized_chunks)
-            else None
-        )
+        self._bm25 = None
+        if any(self._tokenized_chunks):
+            try:
+                self._bm25 = BM25Okapi(self._tokenized_chunks)
+            except Exception:
+                self._bm25 = None
 
     def search(
         self,
@@ -223,13 +224,27 @@ class HybridRetriever:
         if not query_tokens:
             return
 
-        scores = self._bm25.get_scores(query_tokens)
+        try:
+            scores = self._bm25.get_scores(query_tokens)
+        except Exception:
+            return
         ranked_indexes = sorted(
             (index for index, score in enumerate(scores) if score > 0),
             key=lambda index: scores[index],
             reverse=True,
         )
         query_token_set = set(query_tokens)
+        if not ranked_indexes:
+            overlap_scores = [
+                len(query_token_set & chunk_token_set)
+                for chunk_token_set in self._chunk_token_sets
+            ]
+            ranked_indexes = sorted(
+                (index for index, score in enumerate(overlap_scores) if score > 0),
+                key=lambda index: overlap_scores[index],
+                reverse=True,
+            )
+            scores = overlap_scores
 
         for rank, index in enumerate(ranked_indexes, start=1):
             chunk = self.chunks[index]

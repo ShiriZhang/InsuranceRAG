@@ -12,7 +12,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from insurance_rag.config import AppConfig
-from insurance_rag.evaluation import evaluate_synthetic_cases, render_markdown_report
+from insurance_rag.evaluation import (
+    evaluate_local_documents,
+    evaluate_synthetic_cases,
+    render_local_markdown_report,
+    render_markdown_report,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,10 +35,11 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(config.eval_report_dir),
     )
     parser.add_argument("--local-documents", type=Path)
+    parser.add_argument("--local-sample-limit", type=int, default=20)
     args = parser.parse_args(argv)
 
-    if not args.synthetic:
-        print("No evaluation selected. Use --synthetic.")
+    if not args.synthetic and args.local_documents is None:
+        print("No evaluation selected. Use --synthetic or --local-documents.")
         return 2
 
     report_dir = args.report_dir
@@ -41,28 +47,45 @@ def main(argv: list[str] | None = None) -> int:
         report_dir = ROOT / report_dir
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    local_failed = False
     if args.local_documents is not None:
         if not args.local_documents.exists():
             print(
                 f"Skipping local document evaluation: {args.local_documents} does not exist."
             )
+            local_failed = not args.synthetic
         else:
-            print(
-                "Local document evaluation is optional; synthetic evaluation remains the CI target."
+            local_report = evaluate_local_documents(
+                args.local_documents,
+                sample_limit=args.local_sample_limit,
+            )
+            local_markdown = render_local_markdown_report(local_report)
+            (report_dir / "local_document_eval_report.md").write_text(
+                local_markdown,
+                encoding="utf-8",
+            )
+            print(local_markdown)
+            local_failed = (
+                local_report.total_cases == 0
+                or local_report.top3_cases != local_report.total_cases
             )
 
-    cases_path = args.cases
-    if not cases_path.is_absolute():
-        cases_path = ROOT / cases_path
-    try:
-        report = evaluate_synthetic_cases(cases_path)
-    except ValueError as exc:
-        print(f"Evaluation failed: {exc}", file=sys.stderr)
-        return 1
-    markdown = render_markdown_report(report)
-    (report_dir / "synthetic_eval_report.md").write_text(markdown, encoding="utf-8")
-    print(markdown)
-    return 0 if report.passed_cases == report.total_cases else 1
+    synthetic_failed = False
+    if args.synthetic:
+        cases_path = args.cases
+        if not cases_path.is_absolute():
+            cases_path = ROOT / cases_path
+        try:
+            report = evaluate_synthetic_cases(cases_path)
+        except ValueError as exc:
+            print(f"Evaluation failed: {exc}", file=sys.stderr)
+            return 1
+        markdown = render_markdown_report(report)
+        (report_dir / "synthetic_eval_report.md").write_text(markdown, encoding="utf-8")
+        print(markdown)
+        synthetic_failed = report.passed_cases != report.total_cases
+
+    return 1 if synthetic_failed or local_failed else 0
 
 
 if __name__ == "__main__":

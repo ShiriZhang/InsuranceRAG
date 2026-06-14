@@ -8,6 +8,27 @@ def test_infer_section_title_matches_known_clause_heading():
     assert infer_section_title(text, current_title="未识别条款标题") == "责任免除"
 
 
+def test_infer_section_title_matches_numbered_clause_heading():
+    text = "第七条 保险责任\n本合同的保险责任包括重大疾病保险金。"
+
+    assert infer_section_title(text, current_title="未识别条款标题") == "保险责任"
+
+
+def test_infer_section_title_matches_heading_after_page_header_lines():
+    text = (
+        "某保险条款，第4页，共20页\n"
+        "被保险人因意外伤害事故导致身故的，无等待期。\n"
+        "等待期内发生以下情形之一时，我们不承担给付保险金的责任。\n"
+        "一、被保险人在等待期内确诊相关疾病。\n"
+        "二、被保险人在等待期内因疾病导致身故。\n"
+        "本项下累计已交保险费按照合同约定计算。\n"
+        "第七条 保险责任\n"
+        "在本合同保险期间内且本合同有效，我们承担相应保险责任。"
+    )
+
+    assert infer_section_title(text, current_title="未识别条款标题") == "保险责任"
+
+
 def test_chunk_pages_preserves_page_and_source_metadata():
     pages = (
         DocumentPage(

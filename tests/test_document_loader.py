@@ -37,6 +37,18 @@ def test_normalize_page_text_returns_quality_note_for_ocr():
     assert "该页来自 OCR 识别，可能有误。" in page.quality_notes
 
 
+def test_normalize_page_text_preserves_line_boundaries_for_heading_detection():
+    page = normalize_page_text(
+        PageExtraction(
+            page_number=1,
+            text="  第六条   等待期  \n\n 等待期为九十日。  ",
+            extraction_method="text",
+        ),
+    )
+
+    assert page.text == "第六条 等待期\n等待期为九十日。"
+
+
 def test_parse_pdf_bytes_extracts_text_from_in_memory_pdf():
     document = fitz.open()
     page = document.new_page()

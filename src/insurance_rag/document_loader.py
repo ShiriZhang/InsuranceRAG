@@ -29,7 +29,12 @@ def needs_ocr(text: str, config: AppConfig) -> bool:
 
 
 def normalize_page_text(extraction: PageExtraction) -> DocumentPage:
-    text = " ".join(extraction.text.split())
+    lines = [
+        " ".join(line.split())
+        for line in extraction.text.splitlines()
+        if line.strip()
+    ]
+    text = "\n".join(lines)
     notes: list[str] = []
     if extraction.extraction_method == "ocr":
         notes.append("该页来自 OCR 识别，可能有误。")
