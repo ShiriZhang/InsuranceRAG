@@ -185,7 +185,12 @@ def test_verification_result_carries_facts():
 
 
 def test_rerank_explanation_defaults():
-    explanation = RerankExplanation(score=1.5, reasons=("title_intent_match",))
+    explanation = RerankExplanation(score=1.5)
+    explicit_reasons = RerankExplanation(
+        score=1.5,
+        reasons=("title_intent_match",),
+    )
 
     assert explanation.score == 1.5
-    assert explanation.reasons == ("title_intent_match",)
+    assert explanation.reasons == ()
+    assert explicit_reasons.reasons == ("title_intent_match",)
