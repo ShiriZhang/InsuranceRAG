@@ -17,6 +17,12 @@ CONFIG_ENV_VARS = (
     "INSURANCE_RAG_QUERY_REWRITE_LLM",
     "INSURANCE_RAG_ANSWER_GUARD_LLM",
     "INSURANCE_RAG_EVAL_REPORT_DIR",
+    "INSURANCE_RAG_RERANK_ENABLED",
+    "INSURANCE_RAG_RERANK_TOP_N",
+    "INSURANCE_RAG_VERIFIER_ENABLED",
+    "INSURANCE_RAG_VERIFIER_STRICTNESS",
+    "INSURANCE_RAG_HEADING_CONFIDENCE_WARN_THRESHOLD",
+    "INSURANCE_RAG_HARD_NEGATIVE_LOCAL_LIMIT",
 )
 
 
@@ -96,3 +102,21 @@ def test_retrieval_quality_config_from_env(monkeypatch):
     assert config.query_rewrite_llm is True
     assert config.answer_guard_llm is True
     assert config.eval_report_dir == "custom_reports"
+
+
+def test_rerank_and_verifier_config_defaults(monkeypatch):
+    monkeypatch.delenv("INSURANCE_RAG_RERANK_ENABLED", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_RERANK_TOP_N", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_VERIFIER_ENABLED", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_VERIFIER_STRICTNESS", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_HEADING_CONFIDENCE_WARN_THRESHOLD", raising=False)
+    monkeypatch.delenv("INSURANCE_RAG_HARD_NEGATIVE_LOCAL_LIMIT", raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.rerank_enabled is True
+    assert config.rerank_top_n == 20
+    assert config.verifier_enabled is True
+    assert config.verifier_strictness == "balanced"
+    assert config.heading_confidence_warn_threshold == 0.35
+    assert config.hard_negative_local_limit == 20

@@ -1,10 +1,15 @@
 from insurance_rag.models import (
     AnswerGuardResult,
     AnswerPayload,
+    CitationVerificationResult,
+    ClauseMetadata,
+    DocumentChunk,
     GuardStatus,
     QueryRewriteResult,
+    RerankExplanation,
     RetrievalExplanation,
     RetrievalRankDetail,
+    VerifiedFact,
 )
 
 
@@ -130,3 +135,57 @@ def test_answer_payload_carries_guard_result_and_retrieval_explanations():
 
     assert payload.retrieval_explanations == (explanation,)
     assert payload.guard_result is guard_result
+
+
+def test_clause_metadata_defaults_are_low_confidence_unknown():
+    metadata = ClauseMetadata()
+
+    assert metadata.clause_id is None
+    assert metadata.heading_text is None
+    assert metadata.section_title == "未识别条款标题"
+    assert metadata.heading_confidence == "low"
+    assert metadata.heading_source == "fallback"
+
+
+def test_document_chunk_carries_clause_metadata_fields():
+    chunk = DocumentChunk(
+        chunk_id="c1",
+        text="第六条 等待期\n等待期为90天。",
+        page_number=6,
+        section_title="等待期",
+        source_type="user_policy",
+        source_name="policy.pdf",
+        extraction_method="text",
+        clause_id="第六条",
+        heading_text="第六条 等待期",
+        heading_confidence="high",
+        heading_source="line_pattern",
+    )
+
+    assert chunk.clause_id == "第六条"
+    assert chunk.heading_text == "第六条 等待期"
+    assert chunk.heading_confidence == "high"
+    assert chunk.heading_source == "line_pattern"
+
+
+def test_verification_result_carries_facts():
+    fact = VerifiedFact(
+        fact_text="等待期是90天",
+        fact_type="number",
+        status="supported",
+        severity="info",
+        supporting_citation_ids=("policy.pdf:6:等待期",),
+        reason="同一引用中找到等待期和90天。",
+    )
+    result = CitationVerificationResult(facts=(fact,))
+
+    assert result.facts == (fact,)
+    assert result.has_blocking_fact is False
+    assert result.has_warnings is False
+
+
+def test_rerank_explanation_defaults():
+    explanation = RerankExplanation(score=1.5, reasons=("title_intent_match",))
+
+    assert explanation.score == 1.5
+    assert explanation.reasons == ("title_intent_match",)

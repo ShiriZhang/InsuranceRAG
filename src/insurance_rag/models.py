@@ -11,6 +11,15 @@ class DocumentPage:
 
 
 @dataclass(frozen=True)
+class ClauseMetadata:
+    clause_id: str | None = None
+    heading_text: str | None = None
+    section_title: str = "未识别条款标题"
+    heading_confidence: str = "low"
+    heading_source: str = "fallback"
+
+
+@dataclass(frozen=True)
 class DocumentChunk:
     chunk_id: str
     text: str
@@ -20,6 +29,10 @@ class DocumentChunk:
     source_name: str
     extraction_method: str
     quality_notes: tuple[str, ...] = ()
+    clause_id: str | None = None
+    heading_text: str | None = None
+    heading_confidence: str = "low"
+    heading_source: str = "fallback"
 
 
 @dataclass(frozen=True)
@@ -56,6 +69,12 @@ class RetrievalRankDetail:
 
 
 @dataclass(frozen=True)
+class RerankExplanation:
+    score: float
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RetrievalExplanation:
     source_type: str
     source_name: str
@@ -66,6 +85,8 @@ class RetrievalExplanation:
     bm25_score: float | None = None
     matched_terms: tuple[str, ...] = ()
     rank_details: tuple[RetrievalRankDetail, ...] = ()
+    rerank_score: float | None = None
+    rerank_reasons: tuple[str, ...] = ()
 
     @property
     def match_strength(self) -> str:
@@ -77,10 +98,36 @@ class RetrievalExplanation:
 
 
 @dataclass(frozen=True)
+class VerifiedFact:
+    fact_text: str
+    fact_type: str
+    status: str
+    severity: str
+    supporting_citation_ids: tuple[str, ...] = ()
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class CitationVerificationResult:
+    facts: tuple[VerifiedFact, ...] = ()
+    warnings: tuple[str, ...] = ()
+    block_reason: str | None = None
+
+    @property
+    def has_blocking_fact(self) -> bool:
+        return any(fact.severity == "block" for fact in self.facts)
+
+    @property
+    def has_warnings(self) -> bool:
+        return bool(self.warnings) or any(fact.severity == "warn" for fact in self.facts)
+
+
+@dataclass(frozen=True)
 class AnswerGuardResult:
     status: GuardStatus
     warnings: tuple[str, ...] = ()
     block_reason: str | None = None
+    citation_verification: CitationVerificationResult | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +138,7 @@ class AnswerPayload:
     warnings: tuple[str, ...] = ()
     retrieval_explanations: tuple[RetrievalExplanation, ...] = ()
     guard_result: AnswerGuardResult | None = None
+    citation_verification: CitationVerificationResult | None = None
 
 
 @dataclass(frozen=True)

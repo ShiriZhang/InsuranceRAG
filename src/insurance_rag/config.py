@@ -26,6 +26,12 @@ class AppConfig:
     query_rewrite_llm: bool = False
     answer_guard_llm: bool = False
     eval_report_dir: str = "eval_reports"
+    rerank_enabled: bool = True
+    rerank_top_n: int = 20
+    verifier_enabled: bool = True
+    verifier_strictness: str = "balanced"
+    heading_confidence_warn_threshold: float = 0.35
+    hard_negative_local_limit: int = 20
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -48,4 +54,14 @@ class AppConfig:
             query_rewrite_llm=_env_bool("INSURANCE_RAG_QUERY_REWRITE_LLM", False),
             answer_guard_llm=_env_bool("INSURANCE_RAG_ANSWER_GUARD_LLM", False),
             eval_report_dir=os.getenv("INSURANCE_RAG_EVAL_REPORT_DIR", "eval_reports"),
+            rerank_enabled=_env_bool("INSURANCE_RAG_RERANK_ENABLED", True),
+            rerank_top_n=int(os.getenv("INSURANCE_RAG_RERANK_TOP_N", "20")),
+            verifier_enabled=_env_bool("INSURANCE_RAG_VERIFIER_ENABLED", True),
+            verifier_strictness=os.getenv("INSURANCE_RAG_VERIFIER_STRICTNESS", "balanced"),
+            heading_confidence_warn_threshold=float(
+                os.getenv("INSURANCE_RAG_HEADING_CONFIDENCE_WARN_THRESHOLD", "0.35")
+            ),
+            hard_negative_local_limit=int(
+                os.getenv("INSURANCE_RAG_HARD_NEGATIVE_LOCAL_LIMIT", "20")
+            ),
         )
