@@ -51,6 +51,18 @@ class GuardStatus(str, Enum):
     BLOCK = "block"
 
 
+class FactStatus(str, Enum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNCERTAIN = "uncertain"
+
+
+class FactSeverity(str, Enum):
+    INFO = "info"
+    WARN = "warn"
+    BLOCK = "block"
+
+
 @dataclass(frozen=True)
 class QueryRewriteResult:
     original_query: str
@@ -101,10 +113,14 @@ class RetrievalExplanation:
 class VerifiedFact:
     fact_text: str
     fact_type: str
-    status: str
-    severity: str
+    status: FactStatus | str
+    severity: FactSeverity | str
     supporting_citation_ids: tuple[str, ...] = ()
     reason: str | None = None
+
+
+def _matches_fact_value(value: Enum | str, expected: Enum) -> bool:
+    return value == expected or value == expected.value
 
 
 @dataclass(frozen=True)
@@ -115,11 +131,15 @@ class CitationVerificationResult:
 
     @property
     def has_blocking_fact(self) -> bool:
-        return any(fact.severity == "block" for fact in self.facts)
+        return any(
+            _matches_fact_value(fact.severity, FactSeverity.BLOCK) for fact in self.facts
+        )
 
     @property
     def has_warnings(self) -> bool:
-        return bool(self.warnings) or any(fact.severity == "warn" for fact in self.facts)
+        return bool(self.warnings) or any(
+            _matches_fact_value(fact.severity, FactSeverity.WARN) for fact in self.facts
+        )
 
 
 @dataclass(frozen=True)

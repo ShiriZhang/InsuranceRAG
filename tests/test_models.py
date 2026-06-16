@@ -4,6 +4,8 @@ from insurance_rag.models import (
     CitationVerificationResult,
     ClauseMetadata,
     DocumentChunk,
+    FactSeverity,
+    FactStatus,
     GuardStatus,
     QueryRewriteResult,
     RerankExplanation,
@@ -17,6 +19,15 @@ def test_guard_status_values():
     assert GuardStatus.PASS == "pass"
     assert GuardStatus.WARN == "warn"
     assert GuardStatus.BLOCK == "block"
+
+
+def test_fact_status_and_severity_values():
+    assert FactStatus.SUPPORTED == "supported"
+    assert FactStatus.UNSUPPORTED == "unsupported"
+    assert FactStatus.UNCERTAIN == "uncertain"
+    assert FactSeverity.INFO == "info"
+    assert FactSeverity.WARN == "warn"
+    assert FactSeverity.BLOCK == "block"
 
 
 def test_query_rewrite_result_defaults():
@@ -182,6 +193,32 @@ def test_verification_result_carries_facts():
     assert result.facts == (fact,)
     assert result.has_blocking_fact is False
     assert result.has_warnings is False
+
+
+def test_verification_result_detects_blocking_enum_fact():
+    fact = VerifiedFact(
+        fact_text="waiting period is not 90 days",
+        fact_type="number",
+        status=FactStatus.UNSUPPORTED,
+        severity=FactSeverity.BLOCK,
+    )
+    result = CitationVerificationResult(facts=(fact,))
+
+    assert result.has_blocking_fact is True
+    assert result.has_warnings is False
+
+
+def test_verification_result_detects_warning_enum_fact():
+    fact = VerifiedFact(
+        fact_text="deductible needs manual confirmation",
+        fact_type="condition",
+        status=FactStatus.UNCERTAIN,
+        severity=FactSeverity.WARN,
+    )
+    result = CitationVerificationResult(facts=(fact,))
+
+    assert result.has_blocking_fact is False
+    assert result.has_warnings is True
 
 
 def test_rerank_explanation_defaults():

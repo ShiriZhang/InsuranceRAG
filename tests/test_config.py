@@ -120,3 +120,22 @@ def test_rerank_and_verifier_config_defaults(monkeypatch):
     assert config.verifier_strictness == "balanced"
     assert config.heading_confidence_warn_threshold == 0.35
     assert config.hard_negative_local_limit == 20
+
+
+def test_rerank_and_verifier_config_from_env(monkeypatch):
+    clear_config_env(monkeypatch)
+    monkeypatch.setenv("INSURANCE_RAG_RERANK_ENABLED", "false")
+    monkeypatch.setenv("INSURANCE_RAG_RERANK_TOP_N", "7")
+    monkeypatch.setenv("INSURANCE_RAG_VERIFIER_ENABLED", "false")
+    monkeypatch.setenv("INSURANCE_RAG_VERIFIER_STRICTNESS", "strict")
+    monkeypatch.setenv("INSURANCE_RAG_HEADING_CONFIDENCE_WARN_THRESHOLD", "0.6")
+    monkeypatch.setenv("INSURANCE_RAG_HARD_NEGATIVE_LOCAL_LIMIT", "3")
+
+    config = AppConfig.from_env()
+
+    assert config.rerank_enabled is False
+    assert config.rerank_top_n == 7
+    assert config.verifier_enabled is False
+    assert config.verifier_strictness == "strict"
+    assert config.heading_confidence_warn_threshold == 0.6
+    assert config.hard_negative_local_limit == 3
