@@ -118,9 +118,31 @@ class VerifiedFact:
     supporting_citation_ids: tuple[str, ...] = ()
     reason: str | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", _normalize_fact_status(self.status))
+        object.__setattr__(self, "severity", _normalize_fact_severity(self.severity))
 
-def _matches_fact_value(value: Enum | str, expected: Enum) -> bool:
-    return value == expected or value == expected.value
+
+def _normalize_fact_status(value: FactStatus | str) -> FactStatus:
+    if isinstance(value, FactStatus):
+        return value
+    if isinstance(value, str):
+        try:
+            return FactStatus(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid VerifiedFact status: {value!r}") from exc
+    raise ValueError(f"Invalid VerifiedFact status: {value!r}")
+
+
+def _normalize_fact_severity(value: FactSeverity | str) -> FactSeverity:
+    if isinstance(value, FactSeverity):
+        return value
+    if isinstance(value, str):
+        try:
+            return FactSeverity(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid VerifiedFact severity: {value!r}") from exc
+    raise ValueError(f"Invalid VerifiedFact severity: {value!r}")
 
 
 @dataclass(frozen=True)
@@ -131,14 +153,12 @@ class CitationVerificationResult:
 
     @property
     def has_blocking_fact(self) -> bool:
-        return any(
-            _matches_fact_value(fact.severity, FactSeverity.BLOCK) for fact in self.facts
-        )
+        return any(fact.severity is FactSeverity.BLOCK for fact in self.facts)
 
     @property
     def has_warnings(self) -> bool:
         return bool(self.warnings) or any(
-            _matches_fact_value(fact.severity, FactSeverity.WARN) for fact in self.facts
+            fact.severity is FactSeverity.WARN for fact in self.facts
         )
 
 

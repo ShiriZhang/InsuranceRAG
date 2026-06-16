@@ -14,6 +14,8 @@ from insurance_rag.models import (
     VerifiedFact,
 )
 
+import pytest
+
 
 def test_guard_status_values():
     assert GuardStatus.PASS == "pass"
@@ -208,6 +210,20 @@ def test_verification_result_detects_blocking_enum_fact():
     assert result.has_warnings is False
 
 
+def test_verification_result_normalizes_blocking_string_fact():
+    fact = VerifiedFact(
+        fact_text="waiting period is not 90 days",
+        fact_type="number",
+        status="unsupported",
+        severity="block",
+    )
+    result = CitationVerificationResult(facts=(fact,))
+
+    assert fact.status is FactStatus.UNSUPPORTED
+    assert fact.severity is FactSeverity.BLOCK
+    assert result.has_blocking_fact is True
+
+
 def test_verification_result_detects_warning_enum_fact():
     fact = VerifiedFact(
         fact_text="deductible needs manual confirmation",
@@ -219,6 +235,40 @@ def test_verification_result_detects_warning_enum_fact():
 
     assert result.has_blocking_fact is False
     assert result.has_warnings is True
+
+
+def test_verification_result_normalizes_warning_string_fact():
+    fact = VerifiedFact(
+        fact_text="deductible needs manual confirmation",
+        fact_type="condition",
+        status="uncertain",
+        severity="warn",
+    )
+    result = CitationVerificationResult(facts=(fact,))
+
+    assert fact.status is FactStatus.UNCERTAIN
+    assert fact.severity is FactSeverity.WARN
+    assert result.has_warnings is True
+
+
+def test_verified_fact_rejects_invalid_severity_string():
+    with pytest.raises(ValueError):
+        VerifiedFact(
+            fact_text="invalid severity",
+            fact_type="condition",
+            status="supported",
+            severity="block ",
+        )
+
+
+def test_verified_fact_rejects_invalid_status_string():
+    with pytest.raises(ValueError):
+        VerifiedFact(
+            fact_text="invalid status",
+            fact_type="condition",
+            status="SUPPORTED",
+            severity="info",
+        )
 
 
 def test_rerank_explanation_defaults():
