@@ -1,5 +1,6 @@
 import re
 
+from insurance_rag.clause_parser import parse_clause_metadata
 from insurance_rag.models import DocumentChunk, DocumentPage
 
 
@@ -76,18 +77,23 @@ def chunk_pages(
         if not page.text:
             continue
         for part in _split_text(page.text, chunk_size=chunk_size, overlap=overlap):
-            current_title = infer_section_title(part, current_title)
+            metadata = parse_clause_metadata(part, current_title=current_title)
+            current_title = metadata.section_title
             chunk_id = f"{source_type}:{source_name}:p{page.page_number}:c{len(chunks) + 1}"
             chunks.append(
                 DocumentChunk(
                     chunk_id=chunk_id,
                     text=part,
                     page_number=page.page_number,
-                    section_title=current_title,
+                    section_title=metadata.section_title,
                     source_type=source_type,
                     source_name=source_name,
                     extraction_method=page.extraction_method,
                     quality_notes=page.quality_notes,
+                    clause_id=metadata.clause_id,
+                    heading_text=metadata.heading_text,
+                    heading_confidence=metadata.heading_confidence,
+                    heading_source=metadata.heading_source,
                 )
             )
     return tuple(chunks)
