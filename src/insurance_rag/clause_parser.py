@@ -31,12 +31,13 @@ KNOWN_SECTION_TITLES = (
 )
 
 _NUMBERED_HEADING_PATTERNS = (
-    re.compile(r"^(第\s*[零〇一二三四五六七八九十百千万两\d]+\s*条)\s+(.+)$"),
+    re.compile(r"^(第\s*[零〇一二三四五六七八九十百千万两\d]+\s*条)\s*[：:、.．]?\s*(.+)$"),
     re.compile(r"^(\d+(?:\.\d+)+)\s+(.+)$"),
     re.compile(r"^([（(][零〇一二三四五六七八九十百千万两\d]+[）)])\s*(.+)$"),
     re.compile(r"^([零〇一二三四五六七八九十百千万两]+、|\d+\.)\s*(.+)$"),
 )
 _DIRECTORY_LINE_PATTERN = re.compile(r"(?:\.{3,}|…{2,}|·{3,})\s*\d+\s*$")
+_BARE_PAGE_NUMBER_DIRECTORY_PATTERN = re.compile(r"^\d+(?:\.\d+)+\s+.+\s+\d+\s*$")
 
 
 def parse_clause_metadata(
@@ -49,13 +50,6 @@ def parse_clause_metadata(
     for line in lines[:80]:
         known_title = _find_known_title(line)
         if _is_directory_like(line):
-            if known_title is not None:
-                return ClauseMetadata(
-                    heading_text=line,
-                    section_title=known_title,
-                    heading_confidence="medium",
-                    heading_source="known_title",
-                )
             continue
 
         numbered_metadata = _parse_numbered_heading(line)
@@ -107,4 +101,11 @@ def _find_known_title(text: str) -> str | None:
 
 
 def _is_directory_like(line: str) -> bool:
-    return bool(_DIRECTORY_LINE_PATTERN.search(line))
+    if _DIRECTORY_LINE_PATTERN.search(line):
+        return True
+
+    if not _BARE_PAGE_NUMBER_DIRECTORY_PATTERN.match(line):
+        return False
+
+    without_page_number = re.sub(r"\s+\d+\s*$", "", line)
+    return _find_known_title(without_page_number) is not None
