@@ -66,6 +66,27 @@ def test_bare_page_number_directory_line_falls_back():
     assert metadata.heading_source == "fallback"
 
 
+def test_bare_page_number_directory_variants_fall_back_to_current_title():
+    for line in ("一、保险责任 5", "第六条 保险责任 5", "（一）保险责任 5", "1. 保险责任 5"):
+        metadata = parse_clause_metadata(line, current_title="保险期间")
+
+        assert metadata.clause_id is None
+        assert metadata.heading_text is None
+        assert metadata.section_title == "保险期间"
+        assert metadata.heading_confidence == "low"
+        assert metadata.heading_source == "fallback"
+
+
+def test_bare_page_number_directory_before_real_heading_chooses_real_heading():
+    metadata = parse_clause_metadata("第六条 保险责任 5\n第七条 等待期\n等待期为90天。")
+
+    assert metadata.clause_id == "第七条"
+    assert metadata.heading_text == "第七条 等待期"
+    assert metadata.section_title == "等待期"
+    assert metadata.heading_confidence == "high"
+    assert metadata.heading_source == "line_pattern"
+
+
 def test_parses_no_space_article_heading():
     metadata = parse_clause_metadata("第六条等待期\n等待期为90天。")
 
@@ -101,6 +122,34 @@ def test_longer_known_title_wins_over_shorter_substring():
 
     assert metadata.clause_id == "2.4"
     assert metadata.section_title == "基本保险金额"
+    assert metadata.heading_confidence == "high"
+
+
+def test_numbered_heading_accepts_known_title_prefix_with_heading_like_suffix():
+    metadata = parse_clause_metadata("第六条 等待期：90天")
+
+    assert metadata.clause_id == "第六条"
+    assert metadata.heading_text == "第六条 等待期：90天"
+    assert metadata.section_title == "等待期"
+    assert metadata.heading_confidence == "high"
+
+
+def test_numbered_heading_rejects_sentence_like_known_title_mentions():
+    for line in ("一、等待期为90天", "第六条 本合同设有等待期"):
+        metadata = parse_clause_metadata(line)
+
+        assert metadata.clause_id is None
+        assert metadata.heading_text is None
+        assert metadata.section_title == "未识别条款标题"
+        assert metadata.heading_confidence == "low"
+        assert metadata.heading_source == "fallback"
+
+
+def test_known_title_match_prefers_earliest_occurrence_before_length():
+    metadata = parse_clause_metadata("2.5 保险金额与基本保险金额")
+
+    assert metadata.clause_id == "2.5"
+    assert metadata.section_title == "保险金额"
     assert metadata.heading_confidence == "high"
 
 

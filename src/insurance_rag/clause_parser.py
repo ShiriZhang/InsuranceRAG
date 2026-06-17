@@ -37,7 +37,9 @@ _NUMBERED_HEADING_PATTERNS = (
     re.compile(r"^([零〇一二三四五六七八九十百千万两]+、|\d+\.)\s*(.+)$"),
 )
 _DIRECTORY_LINE_PATTERN = re.compile(r"(?:\.{3,}|…{2,}|·{3,})\s*\d+\s*$")
-_BARE_PAGE_NUMBER_DIRECTORY_PATTERN = re.compile(r"^\d+(?:\.\d+)+\s+.+\s+\d+\s*$")
+_BARE_PAGE_NUMBER_DIRECTORY_PATTERN = re.compile(r"^.+\s+\d+\s*$")
+_HEADING_SUFFIX_SEPARATORS = frozenset("：:、.．,，;；/／-—()（）[]【】")
+_HEADING_SUFFIX_CONNECTORS = ("与", "及", "和", "或", "暨")
 
 
 def parse_clause_metadata(
@@ -78,7 +80,7 @@ def _parse_numbered_heading(line: str) -> ClauseMetadata | None:
             continue
 
         clause_id = re.sub(r"\s+", "", match.group(1))
-        title = _find_known_title(match.group(2).strip())
+        title = _find_known_title_for_numbered_heading(match.group(2).strip())
         if title is None:
             return None
 
@@ -94,10 +96,39 @@ def _parse_numbered_heading(line: str) -> ClauseMetadata | None:
 
 
 def _find_known_title(text: str) -> str | None:
-    for title in sorted(KNOWN_SECTION_TITLES, key=len, reverse=True):
-        if title in text:
-            return title
-    return None
+    matches = ((text.find(title), -len(title), title) for title in KNOWN_SECTION_TITLES if title in text)
+    best_match = min(matches, default=None)
+    if best_match is None:
+        return None
+    return best_match[2]
+
+
+def _find_known_title_for_numbered_heading(title_part: str) -> str | None:
+    candidates = []
+    for title in KNOWN_SECTION_TITLES:
+        start = title_part.find(title)
+        if start != 0 or not _has_heading_like_title_shape(title_part, title):
+            continue
+        candidates.append((start, -len(title), title))
+
+    best_match = min(candidates, default=None)
+    if best_match is None:
+        return None
+    return best_match[2]
+
+
+def _has_heading_like_title_shape(text: str, title: str) -> bool:
+    if text == title:
+        return True
+    if not text.startswith(title):
+        return False
+
+    suffix = text[len(title) :].lstrip()
+    if not suffix:
+        return True
+    if suffix[0] in _HEADING_SUFFIX_SEPARATORS:
+        return True
+    return any(suffix.startswith(connector) for connector in _HEADING_SUFFIX_CONNECTORS)
 
 
 def _is_directory_like(line: str) -> bool:
@@ -108,4 +139,4 @@ def _is_directory_like(line: str) -> bool:
         return False
 
     without_page_number = re.sub(r"\s+\d+\s*$", "", line)
-    return _find_known_title(without_page_number) is not None
+    return _parse_numbered_heading(without_page_number) is not None
