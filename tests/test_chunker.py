@@ -25,6 +25,30 @@ def test_chunk_pages_attaches_high_confidence_clause_metadata():
     assert chunks[0].heading_confidence == "high"
 
 
+def test_chunk_pages_preserves_unnumbered_known_heading_suffix_compatibility():
+    pages = (
+        DocumentPage(
+            page_number=6,
+            text="等待期：90天",
+            extraction_method="text",
+        ),
+    )
+
+    chunks = chunk_pages(
+        pages,
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=200,
+        overlap=0,
+    )
+
+    assert chunks[0].section_title == "等待期"
+    assert chunks[0].clause_id is None
+    assert chunks[0].heading_text == "等待期：90天"
+    assert chunks[0].heading_confidence == "medium"
+    assert chunks[0].heading_source == "known_title"
+
+
 def test_chunk_pages_preserves_fallback_title_for_following_chunks():
     pages = (
         DocumentPage(

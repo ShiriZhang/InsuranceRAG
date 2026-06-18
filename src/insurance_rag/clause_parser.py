@@ -40,6 +40,7 @@ _DIRECTORY_LINE_PATTERN = re.compile(r"(?:\.{3,}|…{2,}|·{3,})\s*\d+\s*$")
 _BARE_PAGE_NUMBER_DIRECTORY_PATTERN = re.compile(r"^.+\s+\d+\s*$")
 _HEADING_SUFFIX_SEPARATORS = frozenset("：:、.．,，;；/／-—()（）[]【】")
 _HEADING_SUFFIX_CONNECTORS = ("与", "及", "和", "或", "暨")
+_MAX_STANDALONE_HEADING_SUFFIX_LENGTH = 8
 
 
 def parse_clause_metadata(
@@ -50,7 +51,6 @@ def parse_clause_metadata(
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     for line in lines[:80]:
-        known_title = _find_known_title(line)
         if _is_directory_like(line):
             continue
 
@@ -58,7 +58,8 @@ def parse_clause_metadata(
         if numbered_metadata is not None:
             return numbered_metadata
 
-        if known_title is not None and line == known_title:
+        known_title = _find_known_title_for_standalone_heading(line)
+        if known_title is not None:
             return ClauseMetadata(
                 heading_text=line,
                 section_title=known_title,
@@ -95,14 +96,6 @@ def _parse_numbered_heading(line: str) -> ClauseMetadata | None:
     return None
 
 
-def _find_known_title(text: str) -> str | None:
-    matches = ((text.find(title), -len(title), title) for title in KNOWN_SECTION_TITLES if title in text)
-    best_match = min(matches, default=None)
-    if best_match is None:
-        return None
-    return best_match[2]
-
-
 def _find_known_title_for_numbered_heading(title_part: str) -> str | None:
     candidates = []
     for title in KNOWN_SECTION_TITLES:
@@ -115,6 +108,28 @@ def _find_known_title_for_numbered_heading(title_part: str) -> str | None:
     if best_match is None:
         return None
     return best_match[2]
+
+
+def _find_known_title_for_standalone_heading(line: str) -> str | None:
+    candidates = []
+    for title in KNOWN_SECTION_TITLES:
+        start = line.find(title)
+        if start != 0 or not _has_short_standalone_heading_shape(line, title):
+            continue
+        candidates.append((start, -len(title), title))
+
+    best_match = min(candidates, default=None)
+    if best_match is None:
+        return None
+    return best_match[2]
+
+
+def _has_short_standalone_heading_shape(text: str, title: str) -> bool:
+    if not _has_heading_like_title_shape(text, title):
+        return False
+
+    suffix = text[len(title) :].lstrip()
+    return len(suffix) <= _MAX_STANDALONE_HEADING_SUFFIX_LENGTH
 
 
 def _has_heading_like_title_shape(text: str, title: str) -> bool:

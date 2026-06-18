@@ -36,6 +36,46 @@ def test_parses_standalone_known_heading_as_medium_confidence():
     assert metadata.heading_source == "known_title"
 
 
+def test_parses_standalone_known_heading_with_colon_suffix_as_medium_confidence():
+    metadata = parse_clause_metadata("等待期：90天")
+
+    assert metadata.clause_id is None
+    assert metadata.heading_text == "等待期：90天"
+    assert metadata.section_title == "等待期"
+    assert metadata.heading_confidence == "medium"
+    assert metadata.heading_source == "known_title"
+
+
+def test_parses_standalone_known_heading_with_dash_suffix_as_medium_confidence():
+    metadata = parse_clause_metadata("等待期-90天")
+
+    assert metadata.clause_id is None
+    assert metadata.heading_text == "等待期-90天"
+    assert metadata.section_title == "等待期"
+    assert metadata.heading_confidence == "medium"
+    assert metadata.heading_source == "known_title"
+
+
+def test_parses_standalone_known_heading_with_parenthesized_suffix_as_medium_confidence():
+    metadata = parse_clause_metadata("保险责任（一）")
+
+    assert metadata.clause_id is None
+    assert metadata.heading_text == "保险责任（一）"
+    assert metadata.section_title == "保险责任"
+    assert metadata.heading_confidence == "medium"
+    assert metadata.heading_source == "known_title"
+
+
+def test_standalone_known_title_sentence_like_mention_falls_back_to_current_title():
+    metadata = parse_clause_metadata("等待期为90天", current_title="未识别条款标题")
+
+    assert metadata.clause_id is None
+    assert metadata.heading_text is None
+    assert metadata.section_title == "未识别条款标题"
+    assert metadata.heading_confidence == "low"
+    assert metadata.heading_source == "fallback"
+
+
 def test_directory_like_line_is_not_high_confidence():
     metadata = parse_clause_metadata("2.3 保险责任 ........ 5")
 
