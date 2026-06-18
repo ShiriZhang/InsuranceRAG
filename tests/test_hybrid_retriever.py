@@ -1,7 +1,11 @@
 import pytest
 
 import insurance_rag.hybrid_retriever as hybrid_module
-from insurance_rag.hybrid_retriever import HybridRetriever, tokenize_for_bm25
+from insurance_rag.hybrid_retriever import (
+    HybridRetriever,
+    HybridSearchResult,
+    tokenize_for_bm25,
+)
 from insurance_rag.models import DocumentChunk, QueryRewriteResult
 from insurance_rag.retriever import InMemoryVectorIndex
 
@@ -92,6 +96,21 @@ def test_hybrid_search_uses_bm25_to_recover_exact_term():
     assert explanation.source_name == "user.pdf"
     assert explanation.final_score == results[0].final_score
     assert explanation.matched_terms == results[0].matched_terms
+
+
+def test_hybrid_search_result_explanation_carries_rerank_details():
+    chunk = make_chunk("c1", "等待期为90天。")
+    result = HybridSearchResult(
+        chunk=chunk,
+        final_score=0.02,
+        rerank_score=2.0,
+        rerank_reasons=("title_intent_match",),
+    )
+
+    explanation = result.to_explanation()
+
+    assert explanation.rerank_score == 2.0
+    assert explanation.rerank_reasons == ("title_intent_match",)
 
 
 def test_exact_insurance_term_match_outranks_partial_token_matches():

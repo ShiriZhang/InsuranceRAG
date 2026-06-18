@@ -60,6 +60,8 @@ class HybridSearchResult:
     bm25_score: float | None = None
     matched_terms: tuple[str, ...] = ()
     rank_details: tuple[RetrievalRankDetail, ...] = ()
+    rerank_score: float | None = None
+    rerank_reasons: tuple[str, ...] = ()
 
     def to_explanation(self) -> RetrievalExplanation:
         return RetrievalExplanation(
@@ -72,6 +74,8 @@ class HybridSearchResult:
             bm25_score=self.bm25_score,
             matched_terms=self.matched_terms,
             rank_details=self.rank_details,
+            rerank_score=self.rerank_score,
+            rerank_reasons=self.rerank_reasons,
         )
 
 
