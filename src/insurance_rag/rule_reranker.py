@@ -40,7 +40,6 @@ _CLAUSE_HEADING_RE = re.compile(r"第[一二三四五六七八九十百千万0-9
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?|[一二三四五六七八九十百千万]+")
 _RERANK_WEIGHT = 0.017
 _RERANK_SCORE_LIMIT = 1.5
-_MAX_RERANK_ADJUSTMENT = _RERANK_WEIGHT * _RERANK_SCORE_LIMIT
 _DIRECTORY_LIKE_COMBINED_SCORE_PENALTY = 0.05
 
 

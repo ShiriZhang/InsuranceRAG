@@ -96,8 +96,8 @@ def test_strong_hybrid_result_is_not_swamped_by_small_rule_hit():
 
 def test_hybrid_gap_above_max_rerank_swing_preserves_order():
     candidates = [
-        result("strong", "保险期间", "保险期间为90天。", score=0.08),
-        result("weak", "等待期", "等待期为90天。", score=0.01),
+        result("strong", "保险期间", "保险期间为90天。", score=0.07),
+        result("weak", "等待期", "第六条 等待期\n等待期为90天。", score=0.01),
     ]
 
     reranked = rerank_results(
@@ -160,6 +160,23 @@ def test_no_intent_no_match_preserves_hybrid_order():
     assert [item.chunk.chunk_id for item in reranked] == ["first", "second"]
     assert reranked[0].rerank_reasons == ()
     assert reranked[1].rerank_reasons == ()
+
+
+def test_no_intent_exact_literal_match_can_rerank_close_candidates():
+    candidates = [
+        result("generic", "其他说明", "普通说明。", score=0.025),
+        result("literal", "其他说明", "特殊约定内容。", score=0.02),
+    ]
+
+    reranked = rerank_results(
+        question="特殊约定",
+        rewrite=rewrite_query("特殊约定"),
+        candidates=candidates,
+        top_k=2,
+    )
+
+    assert reranked[0].chunk.chunk_id == "literal"
+    assert "exact_term_match" in reranked[0].rerank_reasons
 
 
 def test_directory_like_chunk_is_demoted_but_explained():
