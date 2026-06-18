@@ -7,7 +7,7 @@ from insurance_rag.models import QueryRewriteResult
 
 _INTENT_TITLE_MATCHES: dict[str, tuple[str, ...]] = {
     "waiting_period": ("等待期",),
-    "exclusion": ("责任免除", "除外责任", "免责条款"),
+    "exclusion": ("责任免除", "除外责任", "免责条款", "免除责任"),
     "coverage": ("保险责任", "保险金给付", "给付条件"),
     "amount": ("保险金额", "基本保险金额"),
     "period": ("保险期间",),
@@ -38,6 +38,8 @@ _FACT_TYPE_TERMS: dict[str, tuple[str, ...]] = {
 
 _CLAUSE_HEADING_RE = re.compile(r"第[一二三四五六七八九十百千万0-9]+[条章节]")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?|[一二三四五六七八九十百千万]+")
+_RERANK_WEIGHT = 0.025
+_RERANK_SCORE_LIMIT = 3.0
 
 
 def rerank_results(
@@ -50,7 +52,7 @@ def rerank_results(
         return []
 
     intents = _detect_intents(question, rewrite)
-    question_terms = _query_terms(question, rewrite)
+    question_terms = _query_terms(rewrite, intents)
     question_numbers = set(_NUMBER_RE.findall(question))
 
     reranked = [
@@ -61,11 +63,17 @@ def rerank_results(
     return sorted(
         reranked,
         key=lambda candidate: (
-            candidate.rerank_score if candidate.rerank_score is not None else 0.0,
+            _combined_score(candidate),
             candidate.final_score,
         ),
         reverse=True,
     )[:top_k]
+
+
+def _combined_score(candidate: HybridSearchResult) -> float:
+    rerank_score = candidate.rerank_score if candidate.rerank_score is not None else 0.0
+    bounded_score = max(-_RERANK_SCORE_LIMIT, min(_RERANK_SCORE_LIMIT, rerank_score))
+    return candidate.final_score + (_RERANK_WEIGHT * bounded_score)
 
 
 def _rerank_candidate(
@@ -81,8 +89,9 @@ def _rerank_candidate(
 
     score = 0.0
     reasons: list[str] = []
+    title_intents = _title_match_intents(intents)
 
-    for intent in intents:
+    for intent in title_intents:
         if _contains_any(title, _INTENT_TITLE_MATCHES.get(intent, ())):
             score += 2.0
             reasons.append("title_intent_match")
@@ -135,9 +144,16 @@ def _detect_intents(
     return _dedupe_preserving_order(intents)
 
 
-def _query_terms(question: str, rewrite: QueryRewriteResult) -> tuple[str, ...]:
+def _title_match_intents(intents: tuple[str, ...]) -> tuple[str, ...]:
+    concrete_intents = tuple(intent for intent in intents if intent != "definition")
+    return concrete_intents or intents
+
+
+def _query_terms(
+    rewrite: QueryRewriteResult, intents: tuple[str, ...]
+) -> tuple[str, ...]:
     terms: list[str] = []
-    for intent in _detect_intents(question, rewrite):
+    for intent in _title_match_intents(intents):
         terms.extend(_INTENT_TITLE_MATCHES.get(intent, ()))
     terms.extend(query for query in rewrite.expanded_queries if len(query) <= 12)
     return _dedupe_preserving_order(terms)
