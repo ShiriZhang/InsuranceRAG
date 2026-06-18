@@ -94,6 +94,22 @@ def test_strong_hybrid_result_is_not_swamped_by_small_rule_hit():
     assert "title_intent_match" in reranked[1].rerank_reasons
 
 
+def test_hybrid_gap_above_max_rerank_swing_preserves_order():
+    candidates = [
+        result("strong", "保险期间", "保险期间为90天。", score=0.08),
+        result("weak", "等待期", "等待期为90天。", score=0.01),
+    ]
+
+    reranked = rerank_results(
+        question="等待期是多久？",
+        rewrite=rewrite_query("等待期是多久？"),
+        candidates=candidates,
+        top_k=2,
+    )
+
+    assert [item.chunk.chunk_id for item in reranked] == ["strong", "weak"]
+
+
 def test_definition_question_with_concrete_term_prefers_concrete_clause():
     candidates = [
         result("definition", "释义", "等待期是指合同生效后的一段期间。", score=0.05),
@@ -165,4 +181,26 @@ def test_directory_like_chunk_is_demoted_but_explained():
     )
 
     assert reranked[0].chunk.chunk_id == "strong"
+    assert "directory_like_chunk" in reranked[1].rerank_reasons
+
+
+def test_directory_penalty_changes_close_ranking():
+    directory_chunk = HybridSearchResult(
+        chunk=chunk(
+            "directory",
+            "等待期",
+            "1 等待期 ........ 2\n2 保险期间 ........ 3\n3 责任免除 ........ 4",
+        ),
+        final_score=0.04,
+    )
+    substantive_chunk = result("substantive", "其他说明", "正文内容。", score=0.02)
+
+    reranked = rerank_results(
+        question="等待期是多久？",
+        rewrite=rewrite_query("等待期是多久？"),
+        candidates=[directory_chunk, substantive_chunk],
+        top_k=2,
+    )
+
+    assert reranked[0].chunk.chunk_id == "substantive"
     assert "directory_like_chunk" in reranked[1].rerank_reasons

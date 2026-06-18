@@ -38,8 +38,10 @@ _FACT_TYPE_TERMS: dict[str, tuple[str, ...]] = {
 
 _CLAUSE_HEADING_RE = re.compile(r"第[一二三四五六七八九十百千万0-9]+[条章节]")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?|[一二三四五六七八九十百千万]+")
-_RERANK_WEIGHT = 0.025
-_RERANK_SCORE_LIMIT = 3.0
+_RERANK_WEIGHT = 0.017
+_RERANK_SCORE_LIMIT = 1.5
+_MAX_RERANK_ADJUSTMENT = _RERANK_WEIGHT * _RERANK_SCORE_LIMIT
+_DIRECTORY_LIKE_COMBINED_SCORE_PENALTY = 0.05
 
 
 def rerank_results(
@@ -73,7 +75,10 @@ def rerank_results(
 def _combined_score(candidate: HybridSearchResult) -> float:
     rerank_score = candidate.rerank_score if candidate.rerank_score is not None else 0.0
     bounded_score = max(-_RERANK_SCORE_LIMIT, min(_RERANK_SCORE_LIMIT, rerank_score))
-    return candidate.final_score + (_RERANK_WEIGHT * bounded_score)
+    adjustment = _RERANK_WEIGHT * bounded_score
+    if "directory_like_chunk" in candidate.rerank_reasons:
+        adjustment -= _DIRECTORY_LIKE_COMBINED_SCORE_PENALTY
+    return candidate.final_score + adjustment
 
 
 def _rerank_candidate(
@@ -98,6 +103,14 @@ def _rerank_candidate(
         if _contains_any(title, _NEGATIVE_TITLE_MATCHES.get(intent, ())):
             score -= 1.5
             reasons.append("negative_title_mismatch")
+
+    if (
+        "definition" in intents
+        and any(intent != "definition" for intent in intents)
+        and _contains_any(title, _INTENT_TITLE_MATCHES["definition"])
+    ):
+        score -= 1.5
+        reasons.append("negative_title_mismatch")
 
     if "exclusion" in intents and _contains_any(combined_text, _FACT_TYPE_TERMS["exclusion"]):
         score += 1.5
