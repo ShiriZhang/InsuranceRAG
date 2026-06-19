@@ -249,6 +249,56 @@ def test_answer_reranks_policy_candidates_before_prompt(monkeypatch):
     assert "title_intent_match" in payload.retrieval_explanations[0].rerank_reasons
 
 
+def test_answer_falls_back_to_original_policy_results_when_rerank_fails(monkeypatch):
+    first_chunk = DocumentChunk(
+        chunk_id="first",
+        text="第一段候选。",
+        page_number=1,
+        section_title="第一段",
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    second_chunk = DocumentChunk(
+        chunk_id="second",
+        text="第二段候选。",
+        page_number=2,
+        section_title="第二段",
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+
+    def raise_rerank_error(**_kwargs):
+        raise RuntimeError("rerank crashed")
+
+    monkeypatch.setattr("insurance_rag.rag_chain.rerank_results", raise_rerank_error)
+    policy_retriever = FakeHybridRetriever([first_chunk, second_chunk])
+    chain, client = make_chain(
+        monkeypatch,
+        policy_retriever=policy_retriever,
+        chat_client=FakeChatClient(answer="根据原始候选回答。"),
+    )
+
+    payload = chain.answer("等待期是多久？")
+    prompt = client.calls[0]["messages"][1]["content"]
+
+    assert policy_retriever.calls[0][1] == chain.config.rerank_top_n
+    assert prompt.find("第一段候选。") < prompt.find("第二段候选。")
+    assert [citation.section_title for citation in payload.policy_citations] == [
+        "第一段",
+        "第二段",
+    ]
+    assert len(payload.retrieval_explanations) == 2
+    assert all(
+        explanation.rerank_score is None
+        for explanation in payload.retrieval_explanations
+    )
+    assert any("规则重排未完成" in warning for warning in payload.warnings)
+
+
 def test_answer_preserves_policy_candidate_order_when_rerank_disabled(monkeypatch):
     first_chunk = DocumentChunk(
         chunk_id="first",
@@ -279,6 +329,50 @@ def test_answer_preserves_policy_candidate_order_when_rerank_disabled(monkeypatc
 
     assert policy_retriever.calls[0][1] == chain.config.policy_top_k
     assert prompt.find("第一段候选。") < prompt.find("第二段候选。")
+
+
+def test_answer_does_not_rerank_builtin_context(monkeypatch):
+    policy_chunk = make_chunk()
+    builtin_first = DocumentChunk(
+        chunk_id="builtin-first",
+        text="内置资料第一段。",
+        page_number=1,
+        section_title="释义",
+        source_type="builtin",
+        source_name="内置条款.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    builtin_second = DocumentChunk(
+        chunk_id="builtin-second",
+        text="内置资料第二段。",
+        page_number=2,
+        section_title="等待期",
+        source_type="builtin",
+        source_name="内置条款.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    chain, client = make_chain(
+        monkeypatch,
+        policy_retriever=FakeHybridRetriever([policy_chunk]),
+        builtin_retriever=FakeHybridRetriever([builtin_first, builtin_second]),
+    )
+
+    payload = chain.answer("什么是等待期？")
+    prompt = client.calls[0]["messages"][1]["content"]
+    builtin_explanations = [
+        explanation
+        for explanation in payload.retrieval_explanations
+        if explanation.source_type == "builtin"
+    ]
+
+    assert prompt.find("内置资料第一段。") < prompt.find("内置资料第二段。")
+    assert [explanation.section_title for explanation in builtin_explanations] == [
+        "释义",
+        "等待期",
+    ]
+    assert all(explanation.rerank_score is None for explanation in builtin_explanations)
 
 
 def test_answer_calls_query_rewriter_and_hybrid_retriever(monkeypatch):
