@@ -14,6 +14,9 @@ POLICY_TERMS = (
     "投保人",
     "被保险人",
     "重大疾病",
+    "免赔额",
+    "赔付比例",
+    "保费",
 )
 
 SOURCE_CONFUSION_TERMS = (
@@ -26,7 +29,7 @@ _NUMBER_WITH_UNIT_RE = re.compile(
     r"(?P<number>\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
     r"\s*(?P<unit>个月|万元|周岁|日|天|年|月|岁|元|%)"
 )
-_FRAGMENT_SPLIT_RE = re.compile(r"[。！？；;!\?\n]+")
+_FRAGMENT_SPLIT_RE = re.compile(r"[。！？；，、,;!\?\n]+")
 _CHINESE_DIGITS = {
     "零": 0,
     "〇": 0,
@@ -95,14 +98,19 @@ def verify_answer_facts(
             )
 
     if not facts and policy_citations and _mentions_policy_term(answer):
-        supporting_citation = policy_citations[0]
+        supporting_citation = _find_term_matching_policy_citation(
+            answer, policy_citations
+        )
+        supporting_citation_ids = ()
+        if supporting_citation is not None:
+            supporting_citation_ids = (_citation_id(supporting_citation),)
         facts.append(
             VerifiedFact(
                 fact_text="政策条款概括性表述",
                 fact_type="general_policy_reference",
                 status="uncertain",
                 severity="warn",
-                supporting_citation_ids=(_citation_id(supporting_citation),),
+                supporting_citation_ids=supporting_citation_ids,
                 reason="答案提到保单条款但没有可精确核对的数值事实。",
             )
         )
@@ -121,9 +129,20 @@ def _has_source_confusion(
     policy_citations: tuple[Citation, ...],
     builtin_citations: tuple[Citation, ...],
 ) -> bool:
-    if policy_citations or not builtin_citations:
+    if not builtin_citations:
         return False
-    return any(term in answer for term in SOURCE_CONFUSION_TERMS)
+    if not any(term in answer for term in SOURCE_CONFUSION_TERMS):
+        return False
+
+    mentioned_terms = _mentioned_policy_terms(answer)
+    if not mentioned_terms:
+        return True
+
+    return not any(
+        _citation_mentions_term(citation, term)
+        for citation in policy_citations
+        for term in mentioned_terms
+    )
 
 
 def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
@@ -154,14 +173,14 @@ def _find_supporting_policy_citation(
     policy_citations: tuple[Citation, ...],
 ) -> Citation | None:
     for citation in policy_citations:
-        citation_text = f"{citation.section_title}\n{citation.excerpt}"
-        if term not in citation_text:
-            continue
-        citation_numbers = {
-            number["normalized"] for number in _extract_numbers(citation_text)
-        }
-        if normalized_number in citation_numbers:
-            return citation
+        for fragment in _citation_fragments(citation):
+            if term not in fragment:
+                continue
+            citation_numbers = {
+                number["normalized"] for number in _extract_numbers(fragment)
+            }
+            if normalized_number in citation_numbers:
+                return citation
     return None
 
 
@@ -226,11 +245,35 @@ def _normalize_unit(unit: str) -> str:
 
 
 def _split_fragments(text: str) -> tuple[str, ...]:
-    return tuple(fragment for fragment in _FRAGMENT_SPLIT_RE.split(text) if fragment)
+    return tuple(
+        fragment.strip() for fragment in _FRAGMENT_SPLIT_RE.split(text) if fragment.strip()
+    )
 
 
 def _mentions_policy_term(text: str) -> bool:
     return any(term in text for term in POLICY_TERMS)
+
+
+def _mentioned_policy_terms(text: str) -> tuple[str, ...]:
+    return tuple(term for term in POLICY_TERMS if term in text)
+
+
+def _find_term_matching_policy_citation(
+    answer: str, policy_citations: tuple[Citation, ...]
+) -> Citation | None:
+    for term in _mentioned_policy_terms(answer):
+        for citation in policy_citations:
+            if _citation_mentions_term(citation, term):
+                return citation
+    return None
+
+
+def _citation_mentions_term(citation: Citation, term: str) -> bool:
+    return term in citation.section_title or term in citation.excerpt
+
+
+def _citation_fragments(citation: Citation) -> tuple[str, ...]:
+    return _split_fragments(citation.section_title) + _split_fragments(citation.excerpt)
 
 
 def _citation_id(citation: Citation) -> str:
