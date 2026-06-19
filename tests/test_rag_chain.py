@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from insurance_rag.config import AppConfig
 from insurance_rag.hybrid_retriever import HybridSearchResult
 from insurance_rag.models import DocumentChunk, GuardStatus, QueryRewriteResult
@@ -209,6 +211,76 @@ def test_answer_degrades_to_policy_only_when_builtin_retriever_errors(monkeypatc
     assert "内置资料库背景：无" in client.calls[0]["messages"][1]["content"]
 
 
+def test_answer_reranks_policy_candidates_before_prompt(monkeypatch):
+    period_chunk = DocumentChunk(
+        chunk_id="period",
+        text="保险期间为90天。",
+        page_number=1,
+        section_title="保险期间",
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    waiting_chunk = DocumentChunk(
+        chunk_id="waiting",
+        text="等待期为90天。",
+        page_number=2,
+        section_title="等待期",
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    policy_retriever = FakeHybridRetriever([period_chunk, waiting_chunk])
+    chain, client = make_chain(
+        monkeypatch,
+        policy_retriever=policy_retriever,
+        chat_client=FakeChatClient(answer="等待期为90天。"),
+    )
+
+    payload = chain.answer("等待期是多久？")
+    prompt = client.calls[0]["messages"][1]["content"]
+
+    assert policy_retriever.calls[0][1] == chain.config.rerank_top_n
+    assert prompt.find("等待期为90天。") < prompt.find("保险期间为90天。")
+    assert payload.policy_citations[0].section_title == "等待期"
+    assert payload.retrieval_explanations[0].rerank_score is not None
+    assert "title_intent_match" in payload.retrieval_explanations[0].rerank_reasons
+
+
+def test_answer_preserves_policy_candidate_order_when_rerank_disabled(monkeypatch):
+    first_chunk = DocumentChunk(
+        chunk_id="first",
+        text="第一段候选。",
+        page_number=1,
+        section_title="第一段",
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    second_chunk = DocumentChunk(
+        chunk_id="second",
+        text="第二段候选。",
+        page_number=2,
+        section_title="第二段",
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        heading_confidence="high",
+    )
+    policy_retriever = FakeHybridRetriever([first_chunk, second_chunk])
+    chain, client = make_chain(monkeypatch, policy_retriever=policy_retriever)
+    chain.config = replace(chain.config, rerank_enabled=False)
+
+    chain.answer("等待期是多久？")
+    prompt = client.calls[0]["messages"][1]["content"]
+
+    assert policy_retriever.calls[0][1] == chain.config.policy_top_k
+    assert prompt.find("第一段候选。") < prompt.find("第二段候选。")
+
+
 def test_answer_calls_query_rewriter_and_hybrid_retriever(monkeypatch):
     policy_retriever = FakeHybridRetriever(
         [make_chunk(quality_notes=())],
@@ -219,7 +291,7 @@ def test_answer_calls_query_rewriter_and_hybrid_retriever(monkeypatch):
     payload = chain.answer("这个赔不赔？")
 
     rewrite, top_k = policy_retriever.calls[0]
-    assert top_k == 2
+    assert top_k == chain.config.rerank_top_n
     assert rewrite.original_query == "这个赔不赔？"
     assert "保险责任" in rewrite.expanded_queries
     assert payload.retrieval_explanations[0].matched_terms == ("保险责任",)

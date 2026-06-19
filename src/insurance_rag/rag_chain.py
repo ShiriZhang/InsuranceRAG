@@ -13,6 +13,7 @@ from insurance_rag.models import (
     QueryRewriteResult,
 )
 from insurance_rag.query_rewriter import rewrite_query
+from insurance_rag.rule_reranker import rerank_results
 
 
 REFUSAL_ANSWER = "这份保单中没有找到足够明确的依据。你可以换一种问法，或确认上传的保单是否完整。"
@@ -97,16 +98,34 @@ class RagChain:
         rewrite = rewrite_query(question, use_llm=self.config.query_rewrite_llm)
         warnings.extend(rewrite.warnings)
 
+        policy_search_top_k = (
+            max(self.config.policy_top_k, self.config.rerank_top_n)
+            if self.config.rerank_enabled
+            else self.config.policy_top_k
+        )
         try:
             policy_results = self.policy_retriever.search(
                 rewrite,
-                top_k=self.config.policy_top_k,
+                top_k=policy_search_top_k,
             )
         except Exception as error:
             return AnswerPayload(
                 answer=REFUSAL_ANSWER,
                 warnings=tuple(warnings + [f"保单检索失败：{error}"]),
             )
+        if self.config.rerank_enabled:
+            try:
+                policy_results = rerank_results(
+                    question=question,
+                    rewrite=rewrite,
+                    candidates=policy_results,
+                    top_k=self.config.policy_top_k,
+                )
+            except Exception as error:
+                warnings.append(f"规则重排未完成，已使用原始检索结果：{error}")
+                policy_results = policy_results[: self.config.policy_top_k]
+        else:
+            policy_results = policy_results[: self.config.policy_top_k]
         policy_chunks = [result.chunk for result in policy_results]
         if not policy_chunks:
             return AnswerPayload(answer=REFUSAL_ANSWER, warnings=tuple(warnings))
