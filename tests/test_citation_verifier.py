@@ -65,6 +65,23 @@ def test_verifier_supports_multi_clause_answer_without_cross_clause_facts():
     assert len(supported_facts) >= 2
 
 
+def test_verifier_does_not_cross_pair_terms_and_numbers_joined_by_he():
+    result = verify_answer_facts(
+        answer="等待期是90天和保险期间是1年。",
+        policy_citations=(
+            citation("等待期", "等待期为90天。"),
+            citation("保险期间", "保险期间为1年。"),
+        ),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["等待期90天", "保险期间1年"]
+
+
 def test_verifier_blocks_builtin_content_as_user_policy_fact():
     result = verify_answer_facts(
         answer="你的保单写明等待期是保险合同生效后的一段观察时间。",
@@ -82,6 +99,20 @@ def test_verifier_blocks_builtin_content_as_user_policy_fact_with_unrelated_poli
     result = verify_answer_facts(
         answer="你的保单写明等待期是保险合同生效后的一段观察时间。",
         policy_citations=(citation("保险金额", "保险金额为10万元。"),),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "内置资料" in result.block_reason
+
+
+def test_verifier_blocks_source_confusion_when_policy_term_citation_is_unrelated():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期是保险合同生效后的一段观察时间。",
+        policy_citations=(citation("等待期", "等待期内不承担保险责任。"),),
         builtin_citations=(
             citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
         ),
@@ -113,6 +144,18 @@ def test_verifier_blocks_unsupported_unlisted_numeric_policy_fact():
     assert result.has_blocking_fact is True
     assert result.block_reason is not None
     assert "免赔额1万元" in result.block_reason
+
+
+def test_verifier_blocks_source_confusing_unlisted_numeric_policy_fact():
+    result = verify_answer_facts(
+        answer="你的保单写明观察期是30天。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "观察期30天" in result.block_reason
 
 
 def test_verifier_warns_with_term_matching_citation_when_available():

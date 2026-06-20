@@ -30,6 +30,14 @@ _NUMBER_WITH_UNIT_RE = re.compile(
     r"\s*(?P<unit>个月|万元|周岁|日|天|年|月|岁|元|%)"
 )
 _FRAGMENT_SPLIT_RE = re.compile(r"[。！？；，、,;!\?\n]+")
+_RELATION_BOUNDARY_RE = re.compile(r"(?:和|及|以及|并且|同时)")
+_SOURCE_CONFUSING_FACT_RE = re.compile(
+    r"(?:你的保单|这份保单写明|保单写明)\s*"
+    r"(?P<term>[\u4e00-\u9fff]{2,12}?)"
+    r"(?:是|为|写明|约定|载明|显示)?\s*"
+    + _NUMBER_WITH_UNIT_RE.pattern
+)
+_MEANINGFUL_CLAIM_MIN_LENGTH = 8
 _CHINESE_DIGITS = {
     "零": 0,
     "〇": 0,
@@ -138,32 +146,80 @@ def _has_source_confusion(
     if not mentioned_terms:
         return True
 
-    return not any(
-        _citation_mentions_term(citation, term)
-        for citation in policy_citations
-        for term in mentioned_terms
-    )
+    return not _policy_citations_support_source_confusing_claim(answer, policy_citations)
 
 
 def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
     seen = set()
     for fragment in _split_fragments(text):
-        terms = [term for term in POLICY_TERMS if term in fragment]
-        numbers = list(_extract_numbers(fragment))
-        for term in terms:
-            for number in numbers:
-                key = (term, number["normalized"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                facts.append(
-                    {
-                        "term": term,
-                        "normalized_number": number["normalized"],
-                        "display_number": number["display"],
-                    }
-                )
+        for fact in _extract_known_term_number_facts(fragment):
+            key = (fact["term"], fact["normalized_number"])
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(fact)
+
+    if any(term in text for term in SOURCE_CONFUSION_TERMS):
+        for fact in _extract_source_confusing_number_facts(text):
+            key = (fact["term"], fact["normalized_number"])
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(fact)
+    return tuple(facts)
+
+
+def _extract_known_term_number_facts(fragment: str) -> tuple[dict[str, str], ...]:
+    facts = []
+    term_matches = sorted(
+        (
+            match
+            for term in POLICY_TERMS
+            for match in re.finditer(re.escape(term), fragment)
+        ),
+        key=lambda match: match.start(),
+    )
+    for index, term_match in enumerate(term_matches):
+        next_term_start = (
+            term_matches[index + 1].start()
+            if index + 1 < len(term_matches)
+            else len(fragment)
+        )
+        relation_span = fragment[term_match.end() : next_term_start]
+        boundary_match = _RELATION_BOUNDARY_RE.search(relation_span)
+        if boundary_match is not None:
+            relation_span = relation_span[: boundary_match.start()]
+
+        number_match = _NUMBER_WITH_UNIT_RE.search(relation_span)
+        if number_match is None:
+            continue
+        number = _number_from_match(number_match)
+        if number is None:
+            continue
+        facts.append(
+            {
+                "term": term_match.group(0),
+                "normalized_number": number["normalized"],
+                "display_number": number["display"],
+            }
+        )
+    return tuple(facts)
+
+
+def _extract_source_confusing_number_facts(text: str) -> tuple[dict[str, str], ...]:
+    facts = []
+    for match in _SOURCE_CONFUSING_FACT_RE.finditer(text):
+        number = _number_from_match(match)
+        if number is None:
+            continue
+        facts.append(
+            {
+                "term": match.group("term"),
+                "normalized_number": number["normalized"],
+                "display_number": number["display"],
+            }
+        )
     return tuple(facts)
 
 
@@ -174,12 +230,12 @@ def _find_supporting_policy_citation(
 ) -> Citation | None:
     for citation in policy_citations:
         for fragment in _citation_fragments(citation):
-            if term not in fragment:
-                continue
-            citation_numbers = {
-                number["normalized"] for number in _extract_numbers(fragment)
-            }
-            if normalized_number in citation_numbers:
+            citation_facts = _extract_known_term_number_facts(fragment)
+            if any(
+                fact["term"] == term
+                and fact["normalized_number"] == normalized_number
+                for fact in citation_facts
+            ):
                 return citation
     return None
 
@@ -187,17 +243,21 @@ def _find_supporting_policy_citation(
 def _extract_numbers(text: str) -> tuple[dict[str, str], ...]:
     numbers = []
     for match in _NUMBER_WITH_UNIT_RE.finditer(text):
-        value = _normalize_number(match.group("number"))
-        if value is None:
-            continue
-        unit = _normalize_unit(match.group("unit"))
-        numbers.append(
-            {
-                "normalized": f"{value}{unit}",
-                "display": f"{value}{unit}",
-            }
-        )
+        number = _number_from_match(match)
+        if number is not None:
+            numbers.append(number)
     return tuple(numbers)
+
+
+def _number_from_match(match: re.Match[str]) -> dict[str, str] | None:
+    value = _normalize_number(match.group("number"))
+    if value is None:
+        return None
+    unit = _normalize_unit(match.group("unit"))
+    return {
+        "normalized": f"{value}{unit}",
+        "display": f"{value}{unit}",
+    }
 
 
 def _normalize_number(raw_number: str) -> str | None:
@@ -246,7 +306,10 @@ def _normalize_unit(unit: str) -> str:
 
 def _split_fragments(text: str) -> tuple[str, ...]:
     return tuple(
-        fragment.strip() for fragment in _FRAGMENT_SPLIT_RE.split(text) if fragment.strip()
+        subfragment.strip()
+        for fragment in _FRAGMENT_SPLIT_RE.split(text)
+        for subfragment in _RELATION_BOUNDARY_RE.split(fragment)
+        if subfragment.strip()
     )
 
 
@@ -270,6 +333,39 @@ def _find_term_matching_policy_citation(
 
 def _citation_mentions_term(citation: Citation, term: str) -> bool:
     return term in citation.section_title or term in citation.excerpt
+
+
+def _policy_citations_support_source_confusing_claim(
+    answer: str, policy_citations: tuple[Citation, ...]
+) -> bool:
+    claims = _source_confusing_claims(answer)
+    if not claims:
+        return False
+    citation_texts = [
+        _normalize_claim_text(citation.section_title + citation.excerpt)
+        for citation in policy_citations
+    ]
+    return any(
+        claim in citation_text
+        for claim in claims
+        for citation_text in citation_texts
+    )
+
+
+def _source_confusing_claims(answer: str) -> tuple[str, ...]:
+    claims = []
+    for fragment in _split_fragments(answer):
+        claim = fragment
+        for prefix in SOURCE_CONFUSION_TERMS:
+            claim = claim.replace(prefix, "")
+        claim = _normalize_claim_text(claim)
+        if len(claim) >= _MEANINGFUL_CLAIM_MIN_LENGTH:
+            claims.append(claim)
+    return tuple(claims)
+
+
+def _normalize_claim_text(text: str) -> str:
+    return re.sub(r"\s+", "", text)
 
 
 def _citation_fragments(citation: Citation) -> tuple[str, ...]:
