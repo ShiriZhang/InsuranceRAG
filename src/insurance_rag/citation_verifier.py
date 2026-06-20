@@ -33,6 +33,7 @@ _FRAGMENT_SPLIT_RE = re.compile(r"[。！？；，、,;!\?\n]+")
 _RELATION_BOUNDARY_RE = re.compile(r"(?:和|及|以及|并且|同时)")
 _SOURCE_CONFUSING_FACT_RE = re.compile(
     r"(?:你的保单|这份保单写明|保单写明)\s*"
+    r"(?:写明|约定|载明|显示)?\s*"
     r"(?P<term>[\u4e00-\u9fff]{2,12}?)"
     r"(?:是|为|写明|约定|载明|显示)?\s*"
     + _NUMBER_WITH_UNIT_RE.pattern
@@ -60,21 +61,9 @@ def verify_answer_facts(
     policy_citations: tuple[Citation, ...],
     builtin_citations: tuple[Citation, ...],
 ) -> CitationVerificationResult:
-    if _has_source_confusion(answer, policy_citations, builtin_citations):
-        fact = VerifiedFact(
-            fact_text="内置资料被表述为用户保单事实",
-            fact_type="source_confusion",
-            status="unsupported",
-            severity="block",
-            reason="答案将内置资料内容表述为你的保单事实，但没有用户保单引用。",
-        )
-        return CitationVerificationResult(
-            facts=(fact,),
-            block_reason="答案可能将内置资料误作用户保单事实，请先核对用户保单原文。",
-        )
-
     facts = []
     unsupported_fact_texts = []
+    has_supported_policy_number_fact = False
 
     answer_facts = _extract_policy_number_facts(answer)
     for answer_fact in answer_facts:
@@ -94,6 +83,7 @@ def verify_answer_facts(
                 )
             )
         else:
+            has_supported_policy_number_fact = True
             facts.append(
                 VerifiedFact(
                     fact_text=f"{answer_fact['term']}{answer_fact['display_number']}",
@@ -104,6 +94,24 @@ def verify_answer_facts(
                     reason="同一个用户保单引用片段中包含相同条款和数值。",
                 )
             )
+
+    if (
+        not has_supported_policy_number_fact
+        and _has_source_confusion(answer, policy_citations, builtin_citations)
+    ):
+        facts.append(
+            VerifiedFact(
+                fact_text="内置资料被表述为用户保单事实",
+                fact_type="source_confusion",
+                status="unsupported",
+                severity="block",
+                reason="答案将内置资料内容表述为你的保单事实，但没有用户保单引用。",
+            )
+        )
+        return CitationVerificationResult(
+            facts=tuple(facts),
+            block_reason="答案可能将内置资料误作用户保单事实，请先核对用户保单原文。",
+        )
 
     if not facts and policy_citations and _mentions_policy_term(answer):
         supporting_citation = _find_term_matching_policy_citation(
@@ -215,12 +223,16 @@ def _extract_source_confusing_number_facts(text: str) -> tuple[dict[str, str], .
             continue
         facts.append(
             {
-                "term": match.group("term"),
+                "term": _normalize_source_confusing_term(match.group("term")),
                 "normalized_number": number["normalized"],
                 "display_number": number["display"],
             }
         )
     return tuple(facts)
+
+
+def _normalize_source_confusing_term(term: str) -> str:
+    return re.sub(r"^(?:写明|约定|载明|显示)+", "", term)
 
 
 def _find_supporting_policy_citation(
@@ -369,7 +381,14 @@ def _normalize_claim_text(text: str) -> str:
 
 
 def _citation_fragments(citation: Citation) -> tuple[str, ...]:
-    return _split_fragments(citation.section_title) + _split_fragments(citation.excerpt)
+    title_fragments = _split_fragments(citation.section_title)
+    excerpt_fragments = _split_fragments(citation.excerpt)
+    combined_fragments = tuple(
+        title_fragment + excerpt_fragment
+        for title_fragment in title_fragments
+        for excerpt_fragment in excerpt_fragments
+    )
+    return title_fragments + excerpt_fragments + combined_fragments
 
 
 def _citation_id(citation: Citation) -> str:

@@ -23,6 +23,18 @@ def test_verifier_supports_numeric_fact_in_same_citation():
     assert result.facts[0].severity == "info"
 
 
+def test_verifier_supports_title_term_with_excerpt_number():
+    result = verify_answer_facts(
+        answer="等待期是90天。",
+        policy_citations=(citation("等待期", "为90天。"),),
+        builtin_citations=(),
+    )
+
+    assert result.facts[0].status == "supported"
+    assert result.facts[0].severity == "info"
+    assert result.has_blocking_fact is False
+
+
 def test_verifier_blocks_numeric_fact_when_number_belongs_to_other_clause():
     result = verify_answer_facts(
         answer="等待期是90天。",
@@ -93,6 +105,38 @@ def test_verifier_blocks_builtin_content_as_user_policy_fact():
 
     assert result.has_blocking_fact is True
     assert "内置资料" in result.block_reason
+
+
+def test_verifier_allows_source_confusing_phrase_when_policy_numeric_fact_supported():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期为30天。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation(
+                "等待期",
+                "等待期是保险合同生效后的一段观察时间。",
+                "built_in_dataset",
+            ),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+
+
+def test_verifier_allows_source_confusing_phrase_with_equivalent_copula():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期是30天。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation(
+                "等待期",
+                "等待期是保险合同生效后的一段观察时间。",
+                "built_in_dataset",
+            ),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
 
 
 def test_verifier_blocks_builtin_content_as_user_policy_fact_with_unrelated_policy_citation():
