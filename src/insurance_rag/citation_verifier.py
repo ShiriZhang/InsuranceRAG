@@ -5,10 +5,12 @@ from insurance_rag.models import Citation, CitationVerificationResult, VerifiedF
 
 POLICY_TERMS = (
     "等待期",
+    "观察期",
     "责任免除",
     "保险责任",
     "除外责任",
     "保险金额",
+    "保额",
     "保险期间",
     "豁免保险费",
     "投保人",
@@ -18,6 +20,10 @@ POLICY_TERMS = (
     "赔付比例",
     "保费",
 )
+POLICY_TERM_ALIASES = {
+    "观察期": "等待期",
+    "保额": "保险金额",
+}
 
 SOURCE_CONFUSION_TERMS = (
     "你的保单",
@@ -63,7 +69,6 @@ def verify_answer_facts(
 ) -> CitationVerificationResult:
     facts = []
     unsupported_fact_texts = []
-    has_supported_policy_number_fact = False
 
     answer_facts = _extract_policy_number_facts(answer)
     for answer_fact in answer_facts:
@@ -83,7 +88,6 @@ def verify_answer_facts(
                 )
             )
         else:
-            has_supported_policy_number_fact = True
             facts.append(
                 VerifiedFact(
                     fact_text=f"{answer_fact['term']}{answer_fact['display_number']}",
@@ -95,10 +99,7 @@ def verify_answer_facts(
                 )
             )
 
-    if (
-        not has_supported_policy_number_fact
-        and _has_source_confusion(answer, policy_citations, builtin_citations)
-    ):
+    if _has_source_confusion(answer, policy_citations, builtin_citations):
         facts.append(
             VerifiedFact(
                 fact_text="内置资料被表述为用户保单事实",
@@ -244,7 +245,7 @@ def _find_supporting_policy_citation(
         for fragment in _citation_fragments(citation):
             citation_facts = _extract_known_term_number_facts(fragment)
             if any(
-                fact["term"] == term
+                _canonical_policy_term(fact["term"]) == _canonical_policy_term(term)
                 and fact["normalized_number"] == normalized_number
                 for fact in citation_facts
             ):
@@ -333,6 +334,10 @@ def _mentioned_policy_terms(text: str) -> tuple[str, ...]:
     return tuple(term for term in POLICY_TERMS if term in text)
 
 
+def _canonical_policy_term(term: str) -> str:
+    return POLICY_TERM_ALIASES.get(term, term)
+
+
 def _find_term_matching_policy_citation(
     answer: str, policy_citations: tuple[Citation, ...]
 ) -> Citation | None:
@@ -344,7 +349,13 @@ def _find_term_matching_policy_citation(
 
 
 def _citation_mentions_term(citation: Citation, term: str) -> bool:
-    return term in citation.section_title or term in citation.excerpt
+    if term in citation.section_title or term in citation.excerpt:
+        return True
+    canonical_term = _canonical_policy_term(term)
+    return (
+        canonical_term in citation.section_title
+        or canonical_term in citation.excerpt
+    )
 
 
 def _policy_citations_support_source_confusing_claim(
@@ -353,14 +364,31 @@ def _policy_citations_support_source_confusing_claim(
     claims = _source_confusing_claims(answer)
     if not claims:
         return False
+    return all(
+        _source_confusing_claim_supported(claim, policy_citations)
+        for claim in claims
+    )
+
+
+def _source_confusing_claim_supported(
+    claim: str, policy_citations: tuple[Citation, ...]
+) -> bool:
     citation_texts = [
         _normalize_claim_text(citation.section_title + citation.excerpt)
         for citation in policy_citations
     ]
-    return any(
-        claim in citation_text
-        for claim in claims
-        for citation_text in citation_texts
+    if any(claim in citation_text for citation_text in citation_texts):
+        return True
+
+    claim_facts = _extract_policy_number_facts(claim)
+    if not claim_facts:
+        return False
+    return all(
+        _find_supporting_policy_citation(
+            fact["term"], fact["normalized_number"], policy_citations
+        )
+        is not None
+        for fact in claim_facts
     )
 
 
@@ -383,11 +411,13 @@ def _normalize_claim_text(text: str) -> str:
 def _citation_fragments(citation: Citation) -> tuple[str, ...]:
     title_fragments = _split_fragments(citation.section_title)
     excerpt_fragments = _split_fragments(citation.excerpt)
-    combined_fragments = tuple(
-        title_fragment + excerpt_fragment
-        for title_fragment in title_fragments
-        for excerpt_fragment in excerpt_fragments
-    )
+    combined_fragments = ()
+    if len(title_fragments) == 1:
+        combined_fragments = tuple(
+            title_fragment + excerpt_fragment
+            for title_fragment in title_fragments
+            for excerpt_fragment in excerpt_fragments
+        )
     return title_fragments + excerpt_fragments + combined_fragments
 
 

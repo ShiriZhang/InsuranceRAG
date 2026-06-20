@@ -35,6 +35,18 @@ def test_verifier_supports_title_term_with_excerpt_number():
     assert result.has_blocking_fact is False
 
 
+def test_verifier_blocks_compound_title_with_bare_excerpt_number():
+    result = verify_answer_facts(
+        answer="等待期是90天。",
+        policy_citations=(citation("等待期、保险期间", "为90天。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
 def test_verifier_blocks_numeric_fact_when_number_belongs_to_other_clause():
     result = verify_answer_facts(
         answer="等待期是90天。",
@@ -123,6 +135,24 @@ def test_verifier_allows_source_confusing_phrase_when_policy_numeric_fact_suppor
     assert result.has_blocking_fact is False
 
 
+def test_verifier_blocks_unsupported_source_confusing_sentence_when_numeric_fact_supported():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期为30天。你的保单写明等待期是保险合同生效后的一段观察时间。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation(
+                "等待期",
+                "等待期是保险合同生效后的一段观察时间。",
+                "built_in_dataset",
+            ),
+        ),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "内置资料" in result.block_reason
+
+
 def test_verifier_allows_source_confusing_phrase_with_equivalent_copula():
     result = verify_answer_facts(
         answer="你的保单写明等待期是30天。",
@@ -200,6 +230,23 @@ def test_verifier_blocks_source_confusing_unlisted_numeric_policy_fact():
     assert result.has_blocking_fact is True
     assert result.block_reason is not None
     assert "观察期30天" in result.block_reason
+
+
+def test_verifier_supports_common_alias_numeric_policy_facts():
+    result = verify_answer_facts(
+        answer="观察期是30天，保额是10万元。",
+        policy_citations=(
+            citation("等待期", "等待期为30天。"),
+            citation("保险金额", "保险金额为10万元。"),
+        ),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["观察期30天", "保额10万元"]
 
 
 def test_verifier_warns_with_term_matching_citation_when_available():
