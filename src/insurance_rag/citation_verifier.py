@@ -39,6 +39,20 @@ SAFE_POLICY_FALLBACK_TERMS = (
     "请上传保单",
     "上传保单后再核对",
 )
+SAFE_POLICY_UNCERTAINTY_TERMS = (
+    "无法确认",
+    "不能确认",
+    "无法核实",
+    "不能核实",
+    "无法判断",
+    "不能判断",
+)
+SAFE_POLICY_CAVEAT_TERMS = (
+    "请以保单条款为准",
+    "以保单条款为准",
+    "请以保单原文为准",
+    "以保单原文为准",
+)
 
 _NUMBER_WITH_UNIT_RE = re.compile(
     r"(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
@@ -188,10 +202,10 @@ def _has_source_confusion(
         return False
     if not any(term in answer for term in SOURCE_CONFUSION_TERMS):
         return False
+    if _is_safe_policy_fallback(answer):
+        return False
 
     mentioned_terms = _mentioned_policy_terms(answer)
-    if not mentioned_terms and _is_safe_policy_fallback(answer):
-        return False
 
     if not mentioned_terms:
         return True
@@ -204,6 +218,15 @@ def _is_safe_policy_fallback(answer: str) -> bool:
         return False
     return not _extract_policy_number_facts(answer) and not _extract_policy_text_facts(
         answer
+    )
+
+
+def _is_non_assertive_policy_fragment(fragment: str) -> bool:
+    normalized_fragment = _normalize_claim_text(fragment)
+    return (
+        any(term in normalized_fragment for term in SAFE_POLICY_FALLBACK_TERMS)
+        or any(term in normalized_fragment for term in SAFE_POLICY_UNCERTAINTY_TERMS)
+        or any(term in normalized_fragment for term in SAFE_POLICY_CAVEAT_TERMS)
     )
 
 
@@ -275,6 +298,9 @@ def _extract_shared_term_number_facts(text: str) -> tuple[dict[str, str], ...]:
 
 
 def _extract_known_term_number_facts(fragment: str) -> tuple[dict[str, str], ...]:
+    if _is_non_assertive_policy_fragment(fragment):
+        return ()
+
     facts = []
     term_matches = sorted(
         (
@@ -315,6 +341,8 @@ def _extract_policy_text_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
     seen = set()
     for fragment in _split_fragments(text):
+        if _is_non_assertive_policy_fragment(fragment):
+            continue
         for fact in (
             *_extract_responsibility_text_facts(fragment),
             *_extract_waiver_subject_text_facts(fragment),
@@ -371,17 +399,20 @@ def _find_supporting_policy_text_citation(
 
 def _extract_source_confusing_number_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
-    for match in _SOURCE_CONFUSING_FACT_RE.finditer(text):
-        number = _number_from_match(match)
-        if number is None:
+    for fragment in _split_fragments(text):
+        if _is_non_assertive_policy_fragment(fragment):
             continue
-        facts.append(
-            {
-                "term": _normalize_source_confusing_term(match.group("term")),
-                "normalized_number": number["normalized"],
-                "display_number": number["display"],
-            }
-        )
+        for match in _SOURCE_CONFUSING_FACT_RE.finditer(fragment):
+            number = _number_from_match(match)
+            if number is None:
+                continue
+            facts.append(
+                {
+                    "term": _normalize_source_confusing_term(match.group("term")),
+                    "normalized_number": number["normalized"],
+                    "display_number": number["display"],
+                }
+            )
     return tuple(facts)
 
 
@@ -550,6 +581,8 @@ def _source_confusing_claim_supported(
 def _source_confusing_claims(answer: str) -> tuple[str, ...]:
     claims = []
     for fragment in _split_fragments(answer):
+        if _is_non_assertive_policy_fragment(fragment):
+            continue
         claim = fragment
         for prefix in SOURCE_CONFUSION_TERMS:
             claim = claim.replace(prefix, "")

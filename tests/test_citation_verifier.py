@@ -494,3 +494,48 @@ def test_verifier_allows_safe_policy_upload_instruction_with_builtin_citation():
 
     assert result.has_blocking_fact is False
     assert result.facts == ()
+
+
+def test_verifier_allows_safe_policy_fallback_that_mentions_policy_term_with_builtin_citation():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文，无法确认等待期，请上传保单后再核对。",
+        policy_citations=(),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+    assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
+
+
+def test_verifier_allows_supported_policy_number_with_generic_caveat_and_builtin_citation():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期为30天，请以保单条款为准。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+    assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
+
+
+def test_verifier_does_not_extract_uncertain_user_proposed_number_as_policy_fact():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文，无法确认等待期是否为90天，请上传保单后再核对。",
+        policy_citations=(),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+    assert not any(
+        fact.fact_type == "number"
+        and fact.status == "unsupported"
+        and fact.fact_text == "等待期90天"
+        for fact in result.facts
+    )
+    assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
