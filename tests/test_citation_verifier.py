@@ -285,3 +285,97 @@ def test_verifier_blocks_unsupported_numeric_fact_without_policy_citations():
     assert result.has_blocking_fact is True
     assert result.block_reason is not None
     assert "等待期90天" in result.block_reason
+
+
+def test_verifier_blocks_unsupported_responsibility_exemption_fact():
+    result = verify_answer_facts(
+        answer="酒后驾驶属于责任免除。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "酒后驾驶" in result.block_reason or "责任免除" in result.block_reason
+
+
+def test_verifier_supports_responsibility_exemption_fact_in_policy_citation():
+    result = verify_answer_facts(
+        answer="酒后驾驶属于责任免除。",
+        policy_citations=(citation("责任免除", "酒后驾驶属于责任免除。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+
+
+def test_verifier_blocks_waiver_subject_mismatch():
+    result = verify_answer_facts(
+        answer="投保人可豁免保险费。",
+        policy_citations=(citation("豁免保险费", "被保险人可豁免保险费。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "投保人" in result.block_reason
+
+
+def test_verifier_supports_waiver_subject_in_policy_citation():
+    result = verify_answer_facts(
+        answer="投保人可豁免保险费。",
+        policy_citations=(citation("豁免保险费", "投保人可豁免保险费。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+
+
+def test_verifier_blocks_unsupported_shared_numeric_fact():
+    result = verify_answer_facts(
+        answer="等待期、保险期间均为90天。",
+        policy_citations=(
+            citation("保险期间", "保险期间为90天。"),
+            citation("等待期", "等待期为30天。"),
+        ),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
+def test_verifier_supports_shared_numeric_facts():
+    result = verify_answer_facts(
+        answer="等待期、保险期间均为90天。",
+        policy_citations=(
+            citation("等待期", "等待期为90天。"),
+            citation("保险期间", "保险期间为90天。"),
+        ),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["等待期90天", "保险期间90天"]
+
+
+def test_verifier_blocks_source_confusion_with_supported_number_and_builtin_definition():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期为30天且等待期是保险合同生效后的一段观察时间。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation(
+                "等待期",
+                "等待期是保险合同生效后的一段观察时间。",
+                "built_in_dataset",
+            ),
+        ),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "内置资料" in result.block_reason

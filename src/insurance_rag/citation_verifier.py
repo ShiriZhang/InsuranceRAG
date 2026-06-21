@@ -36,7 +36,8 @@ _NUMBER_WITH_UNIT_RE = re.compile(
     r"\s*(?P<unit>个月|万元|周岁|日|天|年|月|岁|元|%)"
 )
 _FRAGMENT_SPLIT_RE = re.compile(r"[。！？；，、,;!\?\n]+")
-_RELATION_BOUNDARY_RE = re.compile(r"(?:和|及|以及|并且|同时)")
+_CLAUSE_SPLIT_RE = re.compile(r"[。！？；，,;!\?\n]+")
+_RELATION_BOUNDARY_RE = re.compile(r"(?:以及|并且|同时|和|及|且)")
 _SOURCE_CONFUSING_FACT_RE = re.compile(
     r"(?:你的保单|这份保单写明|保单写明)\s*"
     r"(?:写明|约定|载明|显示)?\s*"
@@ -96,6 +97,34 @@ def verify_answer_facts(
                     severity="info",
                     supporting_citation_ids=(_citation_id(support),),
                     reason="同一个用户保单引用片段中包含相同条款和数值。",
+                )
+            )
+
+    answer_text_facts = _extract_policy_text_facts(answer)
+    for answer_fact in answer_text_facts:
+        support = _find_supporting_policy_text_citation(
+            answer_fact["fact_text"], policy_citations
+        )
+        if support is None:
+            unsupported_fact_texts.append(answer_fact["fact_text"])
+            facts.append(
+                VerifiedFact(
+                    fact_text=answer_fact["fact_text"],
+                    fact_type=answer_fact["fact_type"],
+                    status="unsupported",
+                    severity="block",
+                    reason="未在用户保单引用片段中找到相同政策事实表述。",
+                )
+            )
+        else:
+            facts.append(
+                VerifiedFact(
+                    fact_text=answer_fact["fact_text"],
+                    fact_type=answer_fact["fact_type"],
+                    status="supported",
+                    severity="info",
+                    supporting_citation_ids=(_citation_id(support),),
+                    reason="用户保单引用片段中包含相同政策事实表述。",
                 )
             )
 
@@ -161,6 +190,13 @@ def _has_source_confusion(
 def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
     seen = set()
+    for fact in _extract_shared_term_number_facts(text):
+        key = (fact["term"], fact["normalized_number"])
+        if key in seen:
+            continue
+        seen.add(key)
+        facts.append(fact)
+
     for fragment in _split_fragments(text):
         for fact in _extract_known_term_number_facts(fragment):
             key = (fact["term"], fact["normalized_number"])
@@ -176,6 +212,44 @@ def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
                 continue
             seen.add(key)
             facts.append(fact)
+    return tuple(facts)
+
+
+def _extract_shared_term_number_facts(text: str) -> tuple[dict[str, str], ...]:
+    facts = []
+    for clause in _CLAUSE_SPLIT_RE.split(text):
+        for number_match in _NUMBER_WITH_UNIT_RE.finditer(clause):
+            prefix = clause[: number_match.start()]
+            marker_match = re.search(
+                r"(?:均为|均是|均应为|都为|都是)\s*$", prefix
+            )
+            if marker_match is None:
+                continue
+
+            term_zone = prefix[: marker_match.start()]
+            term_matches = sorted(
+                (
+                    match
+                    for term in POLICY_TERMS
+                    for match in re.finditer(re.escape(term), term_zone)
+                ),
+                key=lambda match: match.start(),
+            )
+            if len(term_matches) < 2:
+                continue
+
+            number = _number_from_match(number_match)
+            if number is None:
+                continue
+
+            facts.extend(
+                {
+                    "term": term_match.group(0),
+                    "normalized_number": number["normalized"],
+                    "display_number": number["display"],
+                }
+                for term_match in term_matches
+            )
     return tuple(facts)
 
 
@@ -214,6 +288,64 @@ def _extract_known_term_number_facts(fragment: str) -> tuple[dict[str, str], ...
             }
         )
     return tuple(facts)
+
+
+def _extract_policy_text_facts(text: str) -> tuple[dict[str, str], ...]:
+    facts = []
+    seen = set()
+    for fragment in _split_fragments(text):
+        for fact in (
+            *_extract_responsibility_text_facts(fragment),
+            *_extract_waiver_subject_text_facts(fragment),
+        ):
+            key = fact["fact_text"]
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(fact)
+    return tuple(facts)
+
+
+def _extract_responsibility_text_facts(fragment: str) -> tuple[dict[str, str], ...]:
+    facts = []
+    for match in re.finditer(
+        r"(?P<subject>[\u4e00-\u9fff]{2,20}?)(?P<relation>属于|列为|纳入|是|为)"
+        r"(?P<category>责任免除|保险责任|除外责任)",
+        fragment,
+    ):
+        facts.append(
+            {
+                "fact_text": _normalize_claim_text(match.group(0)),
+                "fact_type": "policy_text",
+            }
+        )
+    return tuple(facts)
+
+
+def _extract_waiver_subject_text_facts(fragment: str) -> tuple[dict[str, str], ...]:
+    facts = []
+    for match in re.finditer(
+        r"(?P<subject>投保人|被保险人)(?:可|可以|能够|能)豁免保险费",
+        fragment,
+    ):
+        facts.append(
+            {
+                "fact_text": _normalize_claim_text(match.group(0)),
+                "fact_type": "policy_text",
+            }
+        )
+    return tuple(facts)
+
+
+def _find_supporting_policy_text_citation(
+    fact_text: str, policy_citations: tuple[Citation, ...]
+) -> Citation | None:
+    normalized_fact = _normalize_claim_text(fact_text)
+    for citation in policy_citations:
+        citation_text = _normalize_claim_text(citation.section_title + citation.excerpt)
+        if normalized_fact in citation_text:
+            return citation
+    return None
 
 
 def _extract_source_confusing_number_facts(text: str) -> tuple[dict[str, str], ...]:
