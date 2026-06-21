@@ -220,6 +220,82 @@ def test_verifier_blocks_unsupported_unlisted_numeric_policy_fact():
     assert "免赔额1万元" in result.block_reason
 
 
+def test_verifier_blocks_unsupported_policy_age_fact():
+    result = verify_answer_facts(
+        answer="投保年龄是60周岁。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "投保年龄60周岁" in result.block_reason
+
+
+def test_verifier_supports_policy_age_fact_in_policy_citation():
+    result = verify_answer_facts(
+        answer="投保年龄是60周岁。",
+        policy_citations=(citation("投保年龄", "投保年龄为60周岁。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["投保年龄60周岁"]
+
+
+def test_verifier_blocks_unsupported_payment_period_fact():
+    result = verify_answer_facts(
+        answer="交费期间是20年。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "交费期间20年" in result.block_reason
+
+
+def test_verifier_blocks_unsupported_benefit_limit_fact():
+    result = verify_answer_facts(
+        answer="给付限额为100元。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "给付限额100元" in result.block_reason
+
+
+def test_verifier_blocks_comma_formatted_amount_without_policy_citation():
+    result = verify_answer_facts(
+        answer="免赔额是1,000元。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "免赔额" in result.block_reason
+
+
+def test_verifier_supports_comma_formatted_amount_with_plain_policy_citation():
+    result = verify_answer_facts(
+        answer="免赔额是1,000元。",
+        policy_citations=(citation("免赔额", "免赔额为1000元。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["免赔额1000元"]
+
+
 def test_verifier_blocks_source_confusing_unlisted_numeric_policy_fact():
     result = verify_answer_facts(
         answer="你的保单写明观察期是30天。",
@@ -331,6 +407,32 @@ def test_verifier_supports_waiver_subject_in_policy_citation():
     assert result.has_blocking_fact is False
 
 
+def test_verifier_blocks_waiver_subject_mismatch_without_modal():
+    result = verify_answer_facts(
+        answer="投保人豁免保险费。",
+        policy_citations=(citation("豁免保险费", "被保险人豁免保险费。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "投保人豁免保险费" in result.block_reason
+
+
+def test_verifier_supports_waiver_subject_without_modal_in_policy_citation():
+    result = verify_answer_facts(
+        answer="投保人豁免保险费。",
+        policy_citations=(citation("豁免保险费", "投保人豁免保险费。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["投保人豁免保险费"]
+
+
 def test_verifier_blocks_unsupported_shared_numeric_fact():
     result = verify_answer_facts(
         answer="等待期、保险期间均为90天。",
@@ -379,3 +481,16 @@ def test_verifier_blocks_source_confusion_with_supported_number_and_builtin_defi
     assert result.has_blocking_fact is True
     assert result.block_reason is not None
     assert "内置资料" in result.block_reason
+
+
+def test_verifier_allows_safe_policy_upload_instruction_with_builtin_citation():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文，请上传保单后再核对。",
+        policy_citations=(),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+    assert result.facts == ()

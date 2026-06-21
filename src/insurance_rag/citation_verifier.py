@@ -12,11 +12,15 @@ POLICY_TERMS = (
     "保险金额",
     "保额",
     "保险期间",
+    "投保年龄",
+    "交费期间",
+    "缴费期间",
     "豁免保险费",
     "投保人",
     "被保险人",
     "重大疾病",
     "免赔额",
+    "给付限额",
     "赔付比例",
     "保费",
 )
@@ -30,9 +34,14 @@ SOURCE_CONFUSION_TERMS = (
     "这份保单写明",
     "保单写明",
 )
+SAFE_POLICY_FALLBACK_TERMS = (
+    "没有找到你的保单原文",
+    "请上传保单",
+    "上传保单后再核对",
+)
 
 _NUMBER_WITH_UNIT_RE = re.compile(
-    r"(?P<number>\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
+    r"(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
     r"\s*(?P<unit>个月|万元|周岁|日|天|年|月|岁|元|%)"
 )
 _FRAGMENT_SPLIT_RE = re.compile(r"[。！？；，、,;!\?\n]+")
@@ -181,13 +190,25 @@ def _has_source_confusion(
         return False
 
     mentioned_terms = _mentioned_policy_terms(answer)
+    if not mentioned_terms and _is_safe_policy_fallback(answer):
+        return False
+
     if not mentioned_terms:
         return True
 
     return not _policy_citations_support_source_confusing_claim(answer, policy_citations)
 
 
+def _is_safe_policy_fallback(answer: str) -> bool:
+    if not any(term in answer for term in SAFE_POLICY_FALLBACK_TERMS):
+        return False
+    return not _extract_policy_number_facts(answer) and not _extract_policy_text_facts(
+        answer
+    )
+
+
 def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
+    text = _normalize_thousands_separators(text)
     facts = []
     seen = set()
     for fact in _extract_shared_term_number_facts(text):
@@ -325,7 +346,7 @@ def _extract_responsibility_text_facts(fragment: str) -> tuple[dict[str, str], .
 def _extract_waiver_subject_text_facts(fragment: str) -> tuple[dict[str, str], ...]:
     facts = []
     for match in re.finditer(
-        r"(?P<subject>投保人|被保险人)(?:可|可以|能够|能)豁免保险费",
+        r"(?P<subject>投保人|被保险人)(?:可|可以|能够|能)?豁免保险费",
         fragment,
     ):
         facts.append(
@@ -387,7 +408,7 @@ def _find_supporting_policy_citation(
 
 def _extract_numbers(text: str) -> tuple[dict[str, str], ...]:
     numbers = []
-    for match in _NUMBER_WITH_UNIT_RE.finditer(text):
+    for match in _NUMBER_WITH_UNIT_RE.finditer(_normalize_thousands_separators(text)):
         number = _number_from_match(match)
         if number is not None:
             numbers.append(number)
@@ -406,6 +427,7 @@ def _number_from_match(match: re.Match[str]) -> dict[str, str] | None:
 
 
 def _normalize_number(raw_number: str) -> str | None:
+    raw_number = raw_number.replace(",", "")
     if re.fullmatch(r"\d+(?:\.\d+)?", raw_number):
         if raw_number.endswith(".0"):
             return raw_number[:-2]
@@ -450,6 +472,7 @@ def _normalize_unit(unit: str) -> str:
 
 
 def _split_fragments(text: str) -> tuple[str, ...]:
+    text = _normalize_thousands_separators(text)
     return tuple(
         subfragment.strip()
         for fragment in _FRAGMENT_SPLIT_RE.split(text)
@@ -537,7 +560,11 @@ def _source_confusing_claims(answer: str) -> tuple[str, ...]:
 
 
 def _normalize_claim_text(text: str) -> str:
-    return re.sub(r"\s+", "", text)
+    return re.sub(r"\s+", "", _normalize_thousands_separators(text))
+
+
+def _normalize_thousands_separators(text: str) -> str:
+    return re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", text)
 
 
 def _citation_fragments(citation: Citation) -> tuple[str, ...]:
