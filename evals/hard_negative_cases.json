@@ -1,0 +1,84 @@
+[
+  {
+    "case_id": "hard_negative_waiting_period_number",
+    "question": "等待期是多久？",
+    "expected_positive_chunk_id": "waiting-90",
+    "max_expected_rank": 1,
+    "answer": "等待期是90天。",
+    "chunks": [
+      {
+        "chunk_id": "period-90",
+        "section_title": "保险期间",
+        "text": "保险期间为90天。"
+      },
+      {
+        "chunk_id": "waiting-90",
+        "section_title": "等待期",
+        "text": "本合同等待期为90天。"
+      },
+      {
+        "chunk_id": "hesitation-15",
+        "section_title": "犹豫期",
+        "text": "本合同犹豫期为15天。"
+      }
+    ]
+  },
+  {
+    "case_id": "hard_negative_exclusion_vs_coverage",
+    "question": "哪些情况不赔？",
+    "expected_positive_chunk_id": "drunk-driving-exclusion",
+    "max_expected_rank": 1,
+    "answer": "因酒后驾驶导致的事故属于责任免除。",
+    "chunks": [
+      {
+        "chunk_id": "major-disease-coverage",
+        "section_title": "保险责任",
+        "text": "本合同承担重大疾病保险责任。"
+      },
+      {
+        "chunk_id": "drunk-driving-exclusion",
+        "section_title": "责任免除",
+        "text": "因酒后驾驶导致的事故属于责任免除。"
+      }
+    ]
+  },
+  {
+    "case_id": "hard_negative_subject_waiver",
+    "question": "投保人豁免？",
+    "expected_positive_chunk_id": "policyholder-waiver",
+    "max_expected_rank": 1,
+    "answer": "投保人豁免保险费。",
+    "chunks": [
+      {
+        "chunk_id": "insured-waiver",
+        "section_title": "豁免保险费",
+        "text": "被保险人豁免保险费。"
+      },
+      {
+        "chunk_id": "policyholder-waiver",
+        "section_title": "豁免保险费",
+        "text": "投保人豁免保险费。"
+      }
+    ]
+  },
+  {
+    "case_id": "hard_negative_builtin_source_confusion",
+    "question": "这份保单中的等待期是什么？",
+    "expected_positive_chunk_id": "policy-no-specific-waiting-period",
+    "max_expected_rank": 2,
+    "answer": "你的保单写明等待期是保险合同生效后的一段观察时间。",
+    "chunks": [
+      {
+        "chunk_id": "builtin-waiting-definition",
+        "section_title": "等待期",
+        "source_type": "built_in_dataset",
+        "text": "等待期是保险合同生效后的一段观察时间。"
+      },
+      {
+        "chunk_id": "policy-no-specific-waiting-period",
+        "section_title": "保险责任",
+        "text": "本合同承担重大疾病保险责任。"
+      }
+    ]
+  }
+]

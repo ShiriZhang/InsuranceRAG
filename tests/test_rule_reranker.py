@@ -59,6 +59,23 @@ def test_exclusion_question_ranks_exclusion_before_coverage():
     assert "exclusion_fact_type_match" in reranked[0].rerank_reasons
 
 
+def test_waiver_subject_question_prefers_matching_subject():
+    candidates = [
+        result("insured", "豁免保险费", "被保险人豁免保险费。", score=0.02),
+        result("policyholder", "豁免保险费", "投保人豁免保险费。", score=0.01),
+    ]
+
+    reranked = rerank_results(
+        question="投保人豁免？",
+        rewrite=rewrite_query("投保人豁免？"),
+        candidates=candidates,
+        top_k=2,
+    )
+
+    assert reranked[0].chunk.chunk_id == "policyholder"
+    assert "subject_match" in reranked[0].rerank_reasons
+
+
 def test_low_heading_confidence_adds_negative_reason():
     candidates = [
         HybridSearchResult(

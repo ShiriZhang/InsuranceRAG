@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from insurance_rag.chunker import chunk_pages
+from insurance_rag.citation_verifier import verify_answer_facts
 from insurance_rag.config import AppConfig
 from insurance_rag.document_loader import parse_pdf_bytes
 from insurance_rag.hybrid_retriever import HybridRetriever
-from insurance_rag.models import DocumentChunk
+from insurance_rag.models import Citation, DocumentChunk
 from insurance_rag.query_rewriter import rewrite_query
 from insurance_rag.retriever import InMemoryVectorIndex
+from insurance_rag.rule_reranker import rerank_results
 
 
 UNKNOWN_SECTION_TITLE = "未识别条款标题"
@@ -67,6 +69,26 @@ class EvalReport:
     total_cases: int
     passed_cases: int
     results: tuple[EvalCaseResult, ...]
+
+
+@dataclass(frozen=True)
+class HardNegativeCaseResult:
+    case_id: str
+    question: str
+    expected_positive_chunk_id: str
+    positive_rank: int | None
+    max_expected_rank: int
+    retrieved_chunk_ids: tuple[str, ...]
+    rerank_details: tuple[str, ...]
+    verifier_status: str
+    passed: bool
+
+
+@dataclass(frozen=True)
+class HardNegativeEvalReport:
+    total_cases: int
+    passed_cases: int
+    results: tuple[HardNegativeCaseResult, ...]
 
 
 @dataclass(frozen=True)
@@ -184,6 +206,89 @@ def evaluate_synthetic_cases(
     )
 
 
+def evaluate_hard_negative_cases(path: Path, top_k: int = 3) -> HardNegativeEvalReport:
+    if top_k <= 0:
+        raise ValueError("top_k must be at least one.")
+
+    raw_cases = _load_cases(path)
+    embedder = DeterministicEvalEmbedder()
+    results: list[HardNegativeCaseResult] = []
+
+    for index, case in enumerate(raw_cases, start=1):
+        _validate_hard_negative_case(case, index)
+        chunks = _hard_negative_chunks_for_case(case)
+        embeddings = embedder.embed_texts([chunk.text for chunk in chunks])
+        vector_index = InMemoryVectorIndex.from_embeddings(chunks, embeddings)
+        retriever = HybridRetriever(
+            chunks,
+            vector_index,
+            embedder,
+            retrieval_mode="hybrid",
+        )
+        rewrite = rewrite_query(str(case["question"]))
+        initial = retriever.search(rewrite, top_k=max(top_k, len(chunks)))
+        retrieved = rerank_results(
+            question=str(case["question"]),
+            rewrite=rewrite,
+            candidates=initial,
+            top_k=top_k,
+        )
+
+        positive_id = str(case["expected_positive_chunk_id"])
+        positive_rank = _first_chunk_id_rank(retrieved, positive_id)
+        citations = tuple(build_eval_citation(result.chunk) for result in retrieved)
+        verification = verify_answer_facts(
+            answer=str(case.get("answer", "")),
+            policy_citations=tuple(
+                citation
+                for citation in citations
+                if citation.source_type != "built_in_dataset"
+            ),
+            builtin_citations=tuple(
+                citation
+                for citation in citations
+                if citation.source_type == "built_in_dataset"
+            ),
+        )
+        max_rank = int(case.get("max_expected_rank", 1))
+        verifier_status = (
+            "block"
+            if verification.has_blocking_fact
+            else "warn"
+            if verification.has_warnings
+            else "pass"
+        )
+        passed = positive_rank is not None and positive_rank <= max_rank
+        if (
+            case.get("answer")
+            and verification.has_blocking_fact
+            and "source_confusion" not in _case_id(case)
+        ):
+            passed = False
+
+        results.append(
+            HardNegativeCaseResult(
+                case_id=_case_id(case),
+                question=str(case["question"]),
+                expected_positive_chunk_id=positive_id,
+                positive_rank=positive_rank,
+                max_expected_rank=max_rank,
+                retrieved_chunk_ids=tuple(result.chunk.chunk_id for result in retrieved),
+                rerank_details=tuple(
+                    ",".join(result.rerank_reasons) for result in retrieved
+                ),
+                verifier_status=verifier_status,
+                passed=passed,
+            )
+        )
+
+    return HardNegativeEvalReport(
+        total_cases=len(results),
+        passed_cases=sum(1 for result in results if result.passed),
+        results=tuple(results),
+    )
+
+
 def render_markdown_report(report: EvalReport) -> str:
     lines = [
         "# InsuranceRAG Evaluation Report",
@@ -211,6 +316,36 @@ def render_markdown_report(report: EvalReport) -> str:
         )
         if details:
             lines.append(f"  - Details: {details}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_hard_negative_markdown_report(report: HardNegativeEvalReport) -> str:
+    lines = [
+        "# InsuranceRAG Hard Negative Evaluation Report",
+        "",
+        f"Passed {report.passed_cases} / {report.total_cases}",
+        "",
+        "| Case | Positive Rank | Max Rank | Retrieved Chunks | Rerank Details | Verifier | PASS/FAIL |",
+        "| --- | ---: | ---: | --- | --- | --- | --- |",
+    ]
+    for result in report.results:
+        status = "PASS" if result.passed else "FAIL"
+        lines.append(
+            "| {case_id} | {rank} | {max_rank} | {chunks} | {rerank} | {verifier} | {status} |".format(
+                case_id=result.case_id,
+                rank=(
+                    result.positive_rank
+                    if result.positive_rank is not None
+                    else "not found"
+                ),
+                max_rank=result.max_expected_rank,
+                chunks=", ".join(result.retrieved_chunk_ids),
+                rerank="; ".join(result.rerank_details) or "-",
+                verifier=result.verifier_status,
+                status=status,
+            )
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -447,6 +582,13 @@ def _first_term_rank(retrieved: list[Any], expected_term: str) -> int | None:
     return None
 
 
+def _first_chunk_id_rank(retrieved: list[Any], chunk_id: str) -> int | None:
+    for rank, result in enumerate(retrieved, start=1):
+        if result.chunk.chunk_id == chunk_id:
+            return rank
+    return None
+
+
 def _compact_text(text: str) -> str:
     return "".join(text.split())
 
@@ -466,6 +608,67 @@ def _case_label(case: dict[str, Any], index: int) -> str:
     if "case_id" in case or "id" in case:
         return _case_id(case)
     return f"at index {index}"
+
+
+def build_eval_citation(chunk: DocumentChunk) -> Citation:
+    return Citation(
+        source_type=chunk.source_type,
+        source_name=chunk.source_name,
+        page_number=chunk.page_number,
+        section_title=chunk.section_title,
+        excerpt=chunk.text,
+    )
+
+
+def _validate_hard_negative_case(case: Any, index: int) -> None:
+    if not isinstance(case, dict):
+        raise ValueError(f"Hard negative case at index {index} must be an object.")
+
+    label = _case_label(case, index)
+    for field in (
+        "question",
+        "expected_positive_chunk_id",
+        "max_expected_rank",
+        "chunks",
+    ):
+        if field not in case:
+            raise ValueError(f"Hard negative case {label} is missing field: {field}.")
+
+    if "case_id" not in case and "id" not in case:
+        raise ValueError(f"Hard negative case at index {index} is missing field: id.")
+
+    chunks = case.get("chunks")
+    if not isinstance(chunks, list) or not chunks:
+        raise ValueError(f"Hard negative case {label} has invalid chunks.")
+
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        if not isinstance(chunk, dict):
+            raise ValueError(
+                f"Hard negative case {label} chunk {chunk_index} must be an object."
+            )
+        for field in ("chunk_id", "text", "section_title"):
+            if not isinstance(chunk.get(field), str) or not chunk[field].strip():
+                raise ValueError(
+                    f"Hard negative case {label} chunk {chunk_index} is missing invalid field: {field}."
+                )
+
+
+def _hard_negative_chunks_for_case(case: dict[str, Any]) -> tuple[DocumentChunk, ...]:
+    chunks: list[DocumentChunk] = []
+    for index, chunk in enumerate(case.get("chunks", ()), start=1):
+        chunks.append(
+            DocumentChunk(
+                chunk_id=str(chunk["chunk_id"]),
+                text=str(chunk["text"]),
+                page_number=index,
+                section_title=str(chunk["section_title"]),
+                source_type=str(chunk.get("source_type", "synthetic_eval")),
+                source_name=_case_id(case),
+                extraction_method="synthetic",
+                heading_confidence="high",
+            )
+        )
+    return tuple(chunks)
 
 
 def _chunks_for_case(case: dict[str, Any]) -> tuple[DocumentChunk, ...]:

@@ -13,8 +13,10 @@ if str(SRC) not in sys.path:
 
 from insurance_rag.config import AppConfig
 from insurance_rag.evaluation import (
+    evaluate_hard_negative_cases,
     evaluate_local_documents,
     evaluate_synthetic_cases,
+    render_hard_negative_markdown_report,
     render_local_markdown_report,
     render_markdown_report,
 )
@@ -36,10 +38,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--local-documents", type=Path)
     parser.add_argument("--local-sample-limit", type=int, default=20)
+    parser.add_argument("--hard-negative", action="store_true")
+    parser.add_argument(
+        "--hard-negative-cases",
+        type=Path,
+        default=ROOT / "evals" / "hard_negative_cases.json",
+    )
     args = parser.parse_args(argv)
 
-    if not args.synthetic and args.local_documents is None:
-        print("No evaluation selected. Use --synthetic or --local-documents.")
+    if not args.synthetic and not args.hard_negative and args.local_documents is None:
+        print(
+            "No evaluation selected. Use --synthetic, --hard-negative, or --local-documents."
+        )
         return 2
 
     report_dir = args.report_dir
@@ -85,7 +95,25 @@ def main(argv: list[str] | None = None) -> int:
         print(markdown)
         synthetic_failed = report.passed_cases != report.total_cases
 
-    return 1 if synthetic_failed or local_failed else 0
+    hard_negative_failed = False
+    if args.hard_negative:
+        cases_path = args.hard_negative_cases
+        if not cases_path.is_absolute():
+            cases_path = ROOT / cases_path
+        try:
+            hard_report = evaluate_hard_negative_cases(cases_path)
+        except ValueError as exc:
+            print(f"Hard negative evaluation failed: {exc}", file=sys.stderr)
+            return 1
+        hard_markdown = render_hard_negative_markdown_report(hard_report)
+        (report_dir / "hard_negative_eval_report.md").write_text(
+            hard_markdown,
+            encoding="utf-8",
+        )
+        print(hard_markdown)
+        hard_negative_failed = hard_report.passed_cases != hard_report.total_cases
+
+    return 1 if synthetic_failed or local_failed or hard_negative_failed else 0
 
 
 if __name__ == "__main__":

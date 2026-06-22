@@ -35,6 +35,7 @@ _FACT_TYPE_TERMS: dict[str, tuple[str, ...]] = {
     "exclusion": ("不赔", "免除", "除外", "免责"),
     "positive": ("承担", "给付", "赔付", "保障", "保险责任"),
 }
+_SUBJECT_TERMS = ("投保人", "被保险人")
 
 _CLAUSE_HEADING_RE = re.compile(r"第[一二三四五六七八九十百千万0-9]+[条章节]")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?|[一二三四五六七八九十百千万]+")
@@ -55,9 +56,18 @@ def rerank_results(
     intents = _detect_intents(question, rewrite)
     question_terms = _query_terms(rewrite, intents)
     question_numbers = set(_NUMBER_RE.findall(question))
+    question_subjects = tuple(
+        subject for subject in _SUBJECT_TERMS if subject in question
+    )
 
     reranked = [
-        _rerank_candidate(candidate, intents, question_terms, question_numbers)
+        _rerank_candidate(
+            candidate,
+            intents,
+            question_terms,
+            question_numbers,
+            question_subjects,
+        )
         for candidate in candidates
     ]
 
@@ -85,6 +95,7 @@ def _rerank_candidate(
     intents: tuple[str, ...],
     question_terms: tuple[str, ...],
     question_numbers: set[str],
+    question_subjects: tuple[str, ...],
 ) -> HybridSearchResult:
     chunk = candidate.chunk
     title = chunk.section_title or ""
@@ -122,6 +133,17 @@ def _rerank_candidate(
     if any(term and term in combined_text for term in question_terms):
         score += 0.5
         reasons.append("exact_term_match")
+
+    if question_subjects:
+        if any(subject in combined_text for subject in question_subjects):
+            score += 1.0
+            reasons.append("subject_match")
+        if any(
+            subject not in question_subjects and subject in combined_text
+            for subject in _SUBJECT_TERMS
+        ):
+            score -= 2.0
+            reasons.append("subject_mismatch")
 
     if question_numbers and any(number in combined_text for number in question_numbers):
         score += 0.25

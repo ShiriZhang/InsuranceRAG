@@ -9,8 +9,10 @@ import pytest
 
 from insurance_rag.evaluation import (
     DeterministicEvalEmbedder,
+    evaluate_hard_negative_cases,
     evaluate_local_documents,
     evaluate_synthetic_cases,
+    render_hard_negative_markdown_report,
     render_local_markdown_report,
     render_markdown_report,
 )
@@ -18,6 +20,7 @@ from insurance_rag.evaluation import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES_PATH = ROOT / "evals" / "synthetic_cases.json"
+HARD_NEGATIVE_CASES_PATH = ROOT / "evals" / "hard_negative_cases.json"
 
 
 def test_deterministic_embedder_returns_stable_eight_dimensional_vectors():
@@ -46,6 +49,28 @@ def test_synthetic_evaluation_reports_expected_sections_and_passes_cases():
     assert all(result.retrieved_chunk_ids for result in report.results)
     assert all(result.top_fusion_score > 0 for result in report.results)
     assert all(result.expected_rank == 1 for result in report.results)
+
+
+def test_hard_negative_evaluation_passes_repo_cases():
+    report = evaluate_hard_negative_cases(HARD_NEGATIVE_CASES_PATH)
+
+    assert report.total_cases == 4
+    assert report.passed_cases == report.total_cases
+    assert all(result.positive_rank is not None for result in report.results)
+    assert all(
+        result.verifier_status in {"pass", "warn", "block"}
+        for result in report.results
+    )
+
+
+def test_hard_negative_report_contains_rerank_and_verifier_details():
+    report = evaluate_hard_negative_cases(HARD_NEGATIVE_CASES_PATH)
+    markdown = render_hard_negative_markdown_report(report)
+
+    assert "# InsuranceRAG Hard Negative Evaluation Report" in markdown
+    assert "Positive Rank" in markdown
+    assert "Verifier" in markdown
+    assert "hard_negative_waiting_period_number" in markdown
 
 
 def test_synthetic_evaluation_fails_when_expected_evidence_is_after_max_rank():
