@@ -245,10 +245,12 @@ def _assertive_policy_clauses(fragment: str) -> tuple[str, ...]:
 def _assertive_policy_clause_parts(clause: str) -> tuple[str, ...]:
     clause = _strip_policy_caveats(clause)
     clause = _remove_safe_policy_fallback_spans(clause)
-    clause = _assertive_prefix_before_uncertainty(clause)
-    if not clause:
-        return ()
-    return (clause,)
+    parts = []
+    for part in _RELATION_BOUNDARY_RE.split(clause):
+        part = _assertive_prefix_before_uncertainty(part).strip()
+        if part:
+            parts.append(part)
+    return tuple(parts)
 
 
 def _remove_safe_policy_fallback_spans(clause: str) -> str:
@@ -638,13 +640,32 @@ def _source_confusing_claim_supported(
     claim_facts = _extract_policy_number_facts(claim)
     if not claim_facts:
         return False
-    return all(
+    if not all(
         _find_supporting_policy_citation(
             fact["term"], fact["normalized_number"], policy_citations
         )
         is not None
         for fact in claim_facts
-    )
+    ):
+        return False
+    return not _has_meaningful_residue_after_number_facts(claim, claim_facts)
+
+
+def _has_meaningful_residue_after_number_facts(
+    claim: str, claim_facts: tuple[dict[str, str], ...]
+) -> bool:
+    residue = claim
+    for fact in claim_facts:
+        residue = re.sub(
+            rf"{re.escape(fact['term'])}(?:是|为|写明|约定|载明|显示)?"
+            rf"{re.escape(fact['display_number'])}",
+            "",
+            residue,
+            count=1,
+        )
+    residue = re.sub(r"[。！？；，、,;!\?\s]+", "", residue)
+    residue = re.sub(r"(?:是|为|写明|约定|载明|显示)+", "", residue)
+    return len(residue) >= _MEANINGFUL_CLAIM_MIN_LENGTH
 
 
 def _source_confusing_claims(answer: str) -> tuple[str, ...]:

@@ -147,6 +147,24 @@ def test_verifier_allows_source_confusing_phrase_when_policy_numeric_fact_suppor
     assert result.has_blocking_fact is False
 
 
+def test_verifier_blocks_source_confusion_with_supported_number_and_same_claim_builtin_definition():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期为30天等待期是保险合同生效后的一段观察时间。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation(
+                "等待期",
+                "等待期是保险合同生效后的一段观察时间。",
+                "built_in_dataset",
+            ),
+        ),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "内置资料" in result.block_reason
+
+
 def test_verifier_blocks_unsupported_source_confusing_sentence_when_numeric_fact_supported():
     result = verify_answer_facts(
         answer="你的保单写明等待期为30天。你的保单写明等待期是保险合同生效后的一段观察时间。",
@@ -603,6 +621,30 @@ def test_verifier_does_not_extract_uncertain_user_proposed_number_as_policy_fact
         for fact in result.facts
     )
     assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
+
+
+def test_verifier_does_not_extract_standalone_uncertain_user_proposed_number():
+    result = verify_answer_facts(
+        answer="无法确认等待期是否为90天",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    assert result.facts == ()
+
+
+def test_verifier_blocks_asserted_number_after_uncertain_relation_boundary():
+    result = verify_answer_facts(
+        answer="无法确认等待期是否为90天同时保险期间为1年。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" not in result.block_reason
+    assert "保险期间1年" in result.block_reason
 
 
 def test_verifier_blocks_asserted_number_before_fallback_phrase_without_separator():
