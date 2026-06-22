@@ -591,3 +591,26 @@ def test_verifier_does_not_extract_uncertain_user_proposed_number_as_policy_fact
         for fact in result.facts
     )
     assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
+
+
+def test_verifier_blocks_asserted_number_after_fallback_phrase():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文但等待期为90天。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
+def test_verifier_does_not_extract_uncertain_shared_number_as_policy_fact():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文，无法确认等待期、保险期间均为90天，请上传保单后再核对。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    assert result.facts == ()

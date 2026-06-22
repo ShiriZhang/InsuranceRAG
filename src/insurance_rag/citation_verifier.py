@@ -62,6 +62,7 @@ _NUMBER_WITH_UNIT_RE = re.compile(
 )
 _FRAGMENT_SPLIT_RE = re.compile(r"[。！？；，、,;!\?\n]+")
 _CLAUSE_SPLIT_RE = re.compile(r"[。！？；，,;!\?\n]+")
+_CONTRAST_CLAUSE_SPLIT_RE = re.compile(r"(?:但是|但|不过|然而)")
 _RELATION_BOUNDARY_RE = re.compile(r"(?:以及|并且|同时|和|及|且)")
 _SOURCE_CONFUSING_FACT_RE = re.compile(
     r"(?:你的保单|这份保单写明|保单写明)\s*"
@@ -232,9 +233,29 @@ def _is_non_assertive_policy_fragment(fragment: str) -> bool:
 
 
 def _assertive_policy_fragment(fragment: str) -> str:
-    if _is_non_assertive_policy_fragment(fragment):
-        return ""
-    return _strip_policy_caveats(fragment).strip()
+    return "".join(_assertive_policy_clauses(fragment))
+
+
+def _assertive_policy_clauses(fragment: str) -> tuple[str, ...]:
+    clauses = []
+    for clause in _CONTRAST_CLAUSE_SPLIT_RE.split(fragment):
+        if _is_non_assertive_policy_fragment(clause):
+            continue
+        clause = _strip_policy_caveats(clause).strip()
+        if clause:
+            clauses.append(clause)
+    return tuple(clauses)
+
+
+def _assertive_policy_fragments(text: str) -> tuple[str, ...]:
+    text = _normalize_thousands_separators(text)
+    return tuple(
+        subfragment.strip()
+        for fragment in _CLAUSE_SPLIT_RE.split(text)
+        for clause in _assertive_policy_clauses(fragment)
+        for subfragment in _RELATION_BOUNDARY_RE.split(clause)
+        if subfragment.strip()
+    )
 
 
 def _strip_policy_caveats(fragment: str) -> str:
@@ -254,7 +275,7 @@ def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
         seen.add(key)
         facts.append(fact)
 
-    for fragment in _split_fragments(text):
+    for fragment in _assertive_policy_fragments(text):
         for fact in _extract_known_term_number_facts(fragment):
             key = (fact["term"], fact["normalized_number"])
             if key in seen:
@@ -274,7 +295,12 @@ def _extract_policy_number_facts(text: str) -> tuple[dict[str, str], ...]:
 
 def _extract_shared_term_number_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
-    for clause in _CLAUSE_SPLIT_RE.split(text):
+    assertive_clauses = (
+        assertive_clause
+        for clause in _CLAUSE_SPLIT_RE.split(text)
+        for assertive_clause in _assertive_policy_clauses(clause)
+    )
+    for clause in assertive_clauses:
         for number_match in _NUMBER_WITH_UNIT_RE.finditer(clause):
             prefix = clause[: number_match.start()]
             marker_match = re.search(
@@ -354,10 +380,7 @@ def _extract_known_term_number_facts(fragment: str) -> tuple[dict[str, str], ...
 def _extract_policy_text_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
     seen = set()
-    for fragment in _split_fragments(text):
-        fragment = _assertive_policy_fragment(fragment)
-        if not fragment:
-            continue
+    for fragment in _assertive_policy_fragments(text):
         for fact in (
             *_extract_responsibility_text_facts(fragment),
             *_extract_waiver_subject_text_facts(fragment),
@@ -414,10 +437,7 @@ def _find_supporting_policy_text_citation(
 
 def _extract_source_confusing_number_facts(text: str) -> tuple[dict[str, str], ...]:
     facts = []
-    for fragment in _split_fragments(text):
-        fragment = _assertive_policy_fragment(fragment)
-        if not fragment:
-            continue
+    for fragment in _assertive_policy_fragments(text):
         for match in _SOURCE_CONFUSING_FACT_RE.finditer(fragment):
             number = _number_from_match(match)
             if number is None:
@@ -605,10 +625,7 @@ def _source_confusing_claim_supported(
 
 def _source_confusing_claims(answer: str) -> tuple[str, ...]:
     claims = []
-    for fragment in _split_fragments(answer):
-        fragment = _assertive_policy_fragment(fragment)
-        if not fragment:
-            continue
+    for fragment in _assertive_policy_fragments(answer):
         claim = fragment
         for prefix in SOURCE_CONFUSION_TERMS:
             claim = claim.replace(prefix, "")
