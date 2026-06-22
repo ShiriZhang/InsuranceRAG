@@ -97,6 +97,19 @@ def test_allows_supported_policy_fact_with_equivalent_chinese_number_unit():
     assert result.warnings == ()
 
 
+def test_answer_guard_returns_citation_verification_result_for_supported_fact():
+    result = check(
+        "等待期是90天。",
+        policy_citations=(
+            citation(section_title="等待期", excerpt="本合同等待期为九十日。"),
+        ),
+    )
+
+    assert result.citation_verification is not None
+    assert result.citation_verification.facts
+    assert result.citation_verification.facts[0].status == "supported"
+
+
 def test_blocks_numeric_policy_fact_when_number_belongs_to_different_clause():
     result = check(
         "等待期是90天。",

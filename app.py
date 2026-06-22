@@ -137,6 +137,25 @@ def render_retrieval_details(
                 )
 
 
+def render_citation_verification(payload: AnswerPayload) -> None:
+    verification = payload.citation_verification
+    if verification is None or not verification.facts:
+        return
+
+    with st.expander("证据核验结果", expanded=False):
+        for fact in verification.facts:
+            if fact.severity == "block":
+                st.error(f"未通过：{fact.fact_text}")
+            elif fact.severity == "warn":
+                st.warning(f"需核对：{fact.fact_text}")
+            else:
+                st.success(f"已支持：{fact.fact_text}")
+            if fact.reason:
+                st.caption(fact.reason)
+            if fact.supporting_citation_ids:
+                st.write("支持引用：" + "、".join(fact.supporting_citation_ids))
+
+
 def render_citations(payload: AnswerPayload) -> None:
     for warning in payload.warnings:
         st.warning(warning)
@@ -155,6 +174,7 @@ def render_citations(payload: AnswerPayload) -> None:
                 page = f"第 {citation.page_number} 页" if citation.page_number else "页码未知"
                 st.markdown(f"**{citation.source_name}｜{page}｜{citation.section_title}**")
                 st.write(citation.excerpt)
+    render_citation_verification(payload)
     render_retrieval_details(payload.retrieval_explanations)
 
 

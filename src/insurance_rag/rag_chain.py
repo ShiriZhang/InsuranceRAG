@@ -172,6 +172,9 @@ class RagChain:
                 answer = BLOCKED_ANSWER
                 if guard_result.block_reason:
                     warnings.append(guard_result.block_reason)
+        citation_verification = (
+            guard_result.citation_verification if guard_result is not None else None
+        )
 
         return AnswerPayload(
             answer=answer,
@@ -180,4 +183,5 @@ class RagChain:
             warnings=tuple(warnings),
             retrieval_explanations=retrieval_explanations,
             guard_result=guard_result,
+            citation_verification=citation_verification,
         )

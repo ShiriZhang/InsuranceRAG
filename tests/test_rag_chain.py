@@ -421,6 +421,18 @@ def test_answer_guard_warn_preserves_model_answer(monkeypatch):
     assert any("用户保单引用较少" in warning for warning in payload.warnings)
 
 
+def test_answer_payload_includes_citation_verification(monkeypatch):
+    chain, _ = make_chain(
+        monkeypatch,
+        policy_retriever=FakeHybridRetriever([make_chunk(quality_notes=())]),
+        chat_client=FakeChatClient(answer="等待期为九十日。"),
+    )
+
+    payload = chain.answer("等待期是多久？")
+
+    assert payload.citation_verification is not None
+
+
 def test_answer_blocks_model_answer_when_guard_runtime_fails(monkeypatch):
     def raise_guard_error(**_kwargs):
         raise RuntimeError("guard crashed")

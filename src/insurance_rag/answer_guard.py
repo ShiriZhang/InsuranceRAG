@@ -1,5 +1,6 @@
 import re
 
+from insurance_rag.citation_verifier import verify_answer_facts
 from insurance_rag.models import (
     AnswerGuardResult,
     Citation,
@@ -100,6 +101,22 @@ def check_answer(
             block_reason="回答包含最终理赔判断，需改为基于条款的条件性说明。",
         )
 
+    citation_verification = verify_answer_facts(
+        answer=answer,
+        policy_citations=policy_citations,
+        builtin_citations=builtin_citations,
+    )
+    if citation_verification.has_blocking_fact:
+        return AnswerGuardResult(
+            status=GuardStatus.BLOCK,
+            block_reason=_verification_block_reason(
+                answer,
+                policy_citations,
+                citation_verification,
+            ),
+            citation_verification=citation_verification,
+        )
+
     if builtin_citations and _contains_any(answer, _SOURCE_CONFUSING_TERMS):
         unsupported_terms = _unsupported_policy_fact_terms(
             answer,
@@ -110,12 +127,14 @@ def check_answer(
             return AnswerGuardResult(
                 status=GuardStatus.BLOCK,
                 block_reason="回答可能将内置资料库内容表述为用户保单事实，需改为仅引用用户保单原文。",
+                citation_verification=citation_verification,
             )
 
     if not policy_citations and _contains_policy_fact_claim(answer):
         return AnswerGuardResult(
             status=GuardStatus.BLOCK,
             block_reason="回答包含具体保单事实，但没有用户保单引用。",
+            citation_verification=citation_verification,
         )
     if policy_citations and _contains_policy_fact_claim(answer):
         unsupported_terms = _unsupported_policy_fact_terms(
@@ -128,6 +147,7 @@ def check_answer(
             return AnswerGuardResult(
                 status=GuardStatus.BLOCK,
                 block_reason=f"回答中的保单事实未被用户保单引用支持：{terms}。",
+                citation_verification=citation_verification,
             )
 
     warnings: list[str] = []
@@ -145,9 +165,40 @@ def check_answer(
         warnings.append("内置资料库内容仅用于术语或背景解释，不能替代用户保单。")
 
     if warnings:
-        return AnswerGuardResult(status=GuardStatus.WARN, warnings=tuple(warnings))
+        return AnswerGuardResult(
+            status=GuardStatus.WARN,
+            warnings=tuple(warnings + list(citation_verification.warnings)),
+            citation_verification=citation_verification,
+        )
 
-    return AnswerGuardResult(status=GuardStatus.PASS)
+    return AnswerGuardResult(
+        status=GuardStatus.PASS,
+        citation_verification=citation_verification,
+    )
+
+
+def _verification_block_reason(
+    answer: str,
+    policy_citations: tuple[Citation, ...],
+    citation_verification,
+) -> str | None:
+    if any(fact.fact_type == "source_confusion" for fact in citation_verification.facts):
+        return "回答可能将内置资料库内容表述为用户保单事实，需改为仅引用用户保单原文。"
+
+    if not policy_citations and _contains_policy_fact_claim(answer):
+        return "回答包含具体保单事实，但没有用户保单引用。"
+
+    unsupported_facts = [
+        fact.fact_text
+        for fact in citation_verification.facts
+        if fact.severity == "block"
+    ]
+    if unsupported_facts:
+        return "回答中的保单事实未被用户保单引用支持：" + "、".join(
+            unsupported_facts
+        ) + "。"
+
+    return citation_verification.block_reason
 
 
 def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
