@@ -465,6 +465,20 @@ def test_verifier_supports_shared_numeric_facts():
     assert supported_facts == ["等待期90天", "保险期间90天"]
 
 
+def test_verifier_supports_shared_numeric_facts_in_same_policy_citation():
+    result = verify_answer_facts(
+        answer="等待期、保险期间均为90天。",
+        policy_citations=(citation("等待期", "等待期、保险期间均为90天。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is False
+    supported_facts = [
+        fact.fact_text for fact in result.facts if fact.status == "supported"
+    ]
+    assert supported_facts == ["等待期90天", "保险期间90天"]
+
+
 def test_verifier_blocks_source_confusion_with_supported_number_and_builtin_definition():
     result = verify_answer_facts(
         answer="你的保单写明等待期为30天且等待期是保险合同生效后的一段观察时间。",
@@ -520,6 +534,44 @@ def test_verifier_allows_supported_policy_number_with_generic_caveat_and_builtin
 
     assert result.has_blocking_fact is False
     assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
+
+
+def test_verifier_blocks_unsupported_number_before_caveat_without_separator():
+    result = verify_answer_facts(
+        answer="等待期为90天请以保单条款为准。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
+def test_verifier_allows_supported_policy_number_before_caveat_without_separator():
+    result = verify_answer_facts(
+        answer="你的保单写明等待期为30天请以保单条款为准。",
+        policy_citations=(citation("等待期", "等待期为30天。"),),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+    assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
+
+
+def test_verifier_allows_temporarily_missing_policy_upload_instruction_with_builtin_citation():
+    result = verify_answer_facts(
+        answer="你的保单暂未上传，请上传后核对。",
+        policy_citations=(),
+        builtin_citations=(
+            citation("等待期", "等待期是保险合同生效后的一段观察时间。", "built_in_dataset"),
+        ),
+    )
+
+    assert result.has_blocking_fact is False
+    assert result.facts == ()
 
 
 def test_verifier_does_not_extract_uncertain_user_proposed_number_as_policy_fact():
