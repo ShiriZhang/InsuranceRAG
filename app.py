@@ -127,6 +127,11 @@ def render_retrieval_details(
                 scores.append(f"bm25_score={explanation.bm25_score:.4f}")
             st.caption("；".join(scores))
 
+            if explanation.rerank_score is not None:
+                st.caption(f"rerank_score={explanation.rerank_score:.4f}")
+            if explanation.rerank_reasons:
+                st.write("重排依据：" + "、".join(explanation.rerank_reasons))
+
             if explanation.matched_terms:
                 st.write("匹配词：" + "、".join(explanation.matched_terms))
 
