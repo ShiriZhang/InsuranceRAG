@@ -605,6 +605,42 @@ def test_verifier_does_not_extract_uncertain_user_proposed_number_as_policy_fact
     assert not any(fact.fact_type == "source_confusion" for fact in result.facts)
 
 
+def test_verifier_blocks_asserted_number_before_fallback_phrase_without_separator():
+    result = verify_answer_facts(
+        answer="等待期为90天没有找到你的保单原文。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
+def test_verifier_blocks_asserted_number_before_uncertainty_phrase_without_separator():
+    result = verify_answer_facts(
+        answer="等待期为90天无法确认。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
+def test_verifier_blocks_asserted_policy_text_before_fallback_phrase_without_separator():
+    result = verify_answer_facts(
+        answer="酒后驾驶属于责任免除没有找到你的保单原文。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "酒后驾驶" in result.block_reason or "责任免除" in result.block_reason
+
+
 def test_verifier_blocks_asserted_number_after_fallback_phrase():
     result = verify_answer_facts(
         answer="没有找到你的保单原文但等待期为90天。",

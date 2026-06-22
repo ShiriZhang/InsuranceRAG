@@ -228,14 +228,6 @@ def _is_safe_policy_fallback(answer: str) -> bool:
     )
 
 
-def _is_non_assertive_policy_fragment(fragment: str) -> bool:
-    normalized_fragment = _normalize_claim_text(fragment)
-    return (
-        any(term in normalized_fragment for term in SAFE_POLICY_FALLBACK_TERMS)
-        or any(term in normalized_fragment for term in SAFE_POLICY_UNCERTAINTY_TERMS)
-    )
-
-
 def _assertive_policy_fragment(fragment: str) -> str:
     return "".join(_assertive_policy_clauses(fragment))
 
@@ -243,32 +235,38 @@ def _assertive_policy_fragment(fragment: str) -> str:
 def _assertive_policy_clauses(fragment: str) -> tuple[str, ...]:
     clauses = []
     for clause in _CONTRAST_CLAUSE_SPLIT_RE.split(fragment):
-        if _is_non_assertive_policy_fragment(clause):
-            clause = _assertive_suffix_after_safe_fallback(clause)
-            if not clause or _is_non_assertive_policy_fragment(clause):
-                continue
-        clause = _strip_policy_caveats(clause).strip()
-        if clause:
-            clauses.append(clause)
+        for assertive_clause in _assertive_policy_clause_parts(clause):
+            assertive_clause = assertive_clause.strip()
+            if assertive_clause:
+                clauses.append(assertive_clause)
     return tuple(clauses)
 
 
-def _assertive_suffix_after_safe_fallback(fragment: str) -> str:
+def _assertive_policy_clause_parts(clause: str) -> tuple[str, ...]:
+    clause = _strip_policy_caveats(clause)
+    clause = _remove_safe_policy_fallback_spans(clause)
+    clause = _assertive_prefix_before_uncertainty(clause)
+    if not clause:
+        return ()
+    return (clause,)
+
+
+def _remove_safe_policy_fallback_spans(clause: str) -> str:
     for fallback in SAFE_POLICY_FALLBACK_TERMS:
-        fallback_index = fragment.find(fallback)
-        if fallback_index < 0:
-            continue
-        suffix = fragment[fallback_index + len(fallback) :].strip(" ，,。；;：:")
-        if _contains_recognizable_policy_fact(suffix):
-            return suffix
-    return ""
+        clause = clause.replace(fallback, "")
+    return clause
 
 
-def _contains_recognizable_policy_fact(text: str) -> bool:
-    return (
-        _mentions_policy_term(text)
-        and _NUMBER_WITH_UNIT_RE.search(text) is not None
-    ) or _RESPONSIBILITY_TEXT_FACT_RE.search(text) is not None
+def _assertive_prefix_before_uncertainty(clause: str) -> str:
+    uncertainty_indexes = (
+        index
+        for uncertainty in SAFE_POLICY_UNCERTAINTY_TERMS
+        if (index := clause.find(uncertainty)) >= 0
+    )
+    uncertainty_index = min(uncertainty_indexes, default=None)
+    if uncertainty_index is None:
+        return clause
+    return clause[:uncertainty_index]
 
 
 def _assertive_policy_fragments(text: str) -> tuple[str, ...]:
