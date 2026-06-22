@@ -47,6 +47,18 @@ def test_verifier_blocks_compound_title_with_bare_excerpt_number():
     assert "等待期90天" in result.block_reason
 
 
+def test_verifier_blocks_compound_title_with_shared_marker_bare_excerpt_number():
+    result = verify_answer_facts(
+        answer="等待期是90天。",
+        policy_citations=(citation("等待期、保险期间", "均为90天。"),),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
 def test_verifier_blocks_numeric_fact_when_number_belongs_to_other_clause():
     result = verify_answer_facts(
         answer="等待期是90天。",
@@ -603,6 +615,30 @@ def test_verifier_blocks_asserted_number_after_fallback_phrase():
     assert result.has_blocking_fact is True
     assert result.block_reason is not None
     assert "等待期90天" in result.block_reason
+
+
+def test_verifier_blocks_asserted_number_immediately_after_fallback_phrase():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文等待期为90天。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "等待期90天" in result.block_reason
+
+
+def test_verifier_blocks_asserted_policy_text_immediately_after_fallback_phrase():
+    result = verify_answer_facts(
+        answer="没有找到你的保单原文酒后驾驶属于责任免除。",
+        policy_citations=(),
+        builtin_citations=(),
+    )
+
+    assert result.has_blocking_fact is True
+    assert result.block_reason is not None
+    assert "酒后驾驶" in result.block_reason or "责任免除" in result.block_reason
 
 
 def test_verifier_does_not_extract_uncertain_shared_number_as_policy_fact():

@@ -71,6 +71,10 @@ _SOURCE_CONFUSING_FACT_RE = re.compile(
     r"(?:是|为|写明|约定|载明|显示)?\s*"
     + _NUMBER_WITH_UNIT_RE.pattern
 )
+_RESPONSIBILITY_TEXT_FACT_RE = re.compile(
+    r"(?P<subject>[\u4e00-\u9fff]{2,20}?)(?P<relation>属于|列为|纳入|是|为)"
+    r"(?P<category>责任免除|保险责任|除外责任)"
+)
 _MEANINGFUL_CLAIM_MIN_LENGTH = 8
 _CHINESE_DIGITS = {
     "零": 0,
@@ -240,11 +244,31 @@ def _assertive_policy_clauses(fragment: str) -> tuple[str, ...]:
     clauses = []
     for clause in _CONTRAST_CLAUSE_SPLIT_RE.split(fragment):
         if _is_non_assertive_policy_fragment(clause):
-            continue
+            clause = _assertive_suffix_after_safe_fallback(clause)
+            if not clause or _is_non_assertive_policy_fragment(clause):
+                continue
         clause = _strip_policy_caveats(clause).strip()
         if clause:
             clauses.append(clause)
     return tuple(clauses)
+
+
+def _assertive_suffix_after_safe_fallback(fragment: str) -> str:
+    for fallback in SAFE_POLICY_FALLBACK_TERMS:
+        fallback_index = fragment.find(fallback)
+        if fallback_index < 0:
+            continue
+        suffix = fragment[fallback_index + len(fallback) :].strip(" ，,。；;：:")
+        if _contains_recognizable_policy_fact(suffix):
+            return suffix
+    return ""
+
+
+def _contains_recognizable_policy_fact(text: str) -> bool:
+    return (
+        _mentions_policy_term(text)
+        and _NUMBER_WITH_UNIT_RE.search(text) is not None
+    ) or _RESPONSIBILITY_TEXT_FACT_RE.search(text) is not None
 
 
 def _assertive_policy_fragments(text: str) -> tuple[str, ...]:
@@ -395,11 +419,7 @@ def _extract_policy_text_facts(text: str) -> tuple[dict[str, str], ...]:
 
 def _extract_responsibility_text_facts(fragment: str) -> tuple[dict[str, str], ...]:
     facts = []
-    for match in re.finditer(
-        r"(?P<subject>[\u4e00-\u9fff]{2,20}?)(?P<relation>属于|列为|纳入|是|为)"
-        r"(?P<category>责任免除|保险责任|除外责任)",
-        fragment,
-    ):
+    for match in _RESPONSIBILITY_TEXT_FACT_RE.finditer(fragment):
         facts.append(
             {
                 "fact_text": _normalize_claim_text(match.group(0)),
@@ -462,15 +482,17 @@ def _find_supporting_policy_citation(
     policy_citations: tuple[Citation, ...],
 ) -> Citation | None:
     for citation in policy_citations:
-        citation_facts = _extract_policy_number_facts(
-            citation.section_title + citation.excerpt
-        )
-        if any(
-            _canonical_policy_term(fact["term"]) == _canonical_policy_term(term)
-            and fact["normalized_number"] == normalized_number
-            for fact in citation_facts
-        ):
-            return citation
+        citation_texts = [citation.excerpt]
+        if not _is_compound_policy_title(citation.section_title):
+            citation_texts.append(citation.section_title + citation.excerpt)
+        for citation_text in citation_texts:
+            citation_facts = _extract_policy_number_facts(citation_text)
+            if any(
+                _canonical_policy_term(fact["term"]) == _canonical_policy_term(term)
+                and fact["normalized_number"] == normalized_number
+                for fact in citation_facts
+            ):
+                return citation
         for fragment in _citation_fragments(citation):
             citation_facts = _extract_known_term_number_facts(fragment)
             if any(
@@ -587,6 +609,10 @@ def _citation_mentions_term(citation: Citation, term: str) -> bool:
         canonical_term in citation.section_title
         or canonical_term in citation.excerpt
     )
+
+
+def _is_compound_policy_title(title: str) -> bool:
+    return len(_mentioned_policy_terms(title)) > 1
 
 
 def _policy_citations_support_source_confusing_claim(
