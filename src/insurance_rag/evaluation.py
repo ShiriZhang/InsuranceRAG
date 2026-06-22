@@ -26,6 +26,12 @@ LOCAL_EVAL_QUERIES: tuple[tuple[str, str], ...] = (
     ("保险金额", "保险金额"),
     ("豁免保险费", "豁免保险费"),
 )
+LOCAL_HARD_NEGATIVE_QUERY_PAIRS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("等待期", "等待期是多久？", ("保险期间", "犹豫期", "宽限期")),
+    ("责任免除", "哪些情况不赔？", ("保险责任",)),
+    ("保险责任", "保障哪些内容？", ("责任免除",)),
+    ("豁免保险费", "豁免保险费适用于谁？", ("保险费",)),
+)
 
 
 class DeterministicEvalEmbedder:
@@ -357,6 +363,41 @@ def evaluate_local_documents(
     top_k: int = 3,
     config: AppConfig | None = None,
 ) -> LocalDocumentEvalReport:
+    return _evaluate_local_documents(
+        documents_dir,
+        query_specs=tuple(
+            (expected_term, question, ()) for expected_term, question in LOCAL_EVAL_QUERIES
+        ),
+        sample_limit=sample_limit,
+        top_k=top_k,
+        config=config,
+    )
+
+
+def evaluate_local_hard_negative_documents(
+    documents_dir: Path,
+    *,
+    sample_limit: int = 20,
+    top_k: int = 3,
+    config: AppConfig | None = None,
+) -> LocalDocumentEvalReport:
+    return _evaluate_local_documents(
+        documents_dir,
+        query_specs=LOCAL_HARD_NEGATIVE_QUERY_PAIRS,
+        sample_limit=sample_limit,
+        top_k=top_k,
+        config=config,
+    )
+
+
+def _evaluate_local_documents(
+    documents_dir: Path,
+    *,
+    query_specs: tuple[tuple[str, str, tuple[str, ...]], ...],
+    sample_limit: int,
+    top_k: int,
+    config: AppConfig | None,
+) -> LocalDocumentEvalReport:
     if sample_limit <= 0:
         raise ValueError("sample_limit must be at least one.")
     if top_k <= 0:
@@ -410,8 +451,12 @@ def evaluate_local_documents(
             retrieval_mode="hybrid",
         )
         document_text = _compact_text("\n".join(chunk.text for chunk in chunks))
-        for expected_term, question in LOCAL_EVAL_QUERIES:
+        for expected_term, question, negative_terms in query_specs:
             if _compact_text(expected_term) not in document_text:
+                continue
+            if negative_terms and not any(
+                _compact_text(term) in document_text for term in negative_terms
+            ):
                 continue
             retrieved = retriever.search(rewrite_query(question), top_k=top_k)
             expected_rank = _first_term_rank(retrieved, expected_term)

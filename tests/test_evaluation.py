@@ -10,6 +10,7 @@ import pytest
 from insurance_rag.evaluation import (
     DeterministicEvalEmbedder,
     evaluate_hard_negative_cases,
+    evaluate_local_hard_negative_documents,
     evaluate_local_documents,
     evaluate_synthetic_cases,
     render_hard_negative_markdown_report,
@@ -165,6 +166,20 @@ def test_local_document_evaluation_scores_real_pdf_terms():
     assert "等待期" in markdown
 
 
+def test_local_hard_negative_evaluation_builds_cases_from_pdf():
+    docs_dir = _repo_tmp_dir("local-hard-negative-docs")
+    _write_pdf(
+        docs_dir / "sample.pdf",
+        "第六条 等待期\n等待期为九十日。\n第七条 保险期间\n保险期间为一年。\n第八条 责任免除\n酒后驾驶属于责任免除。",
+    )
+
+    report = evaluate_local_hard_negative_documents(docs_dir, sample_limit=1)
+
+    assert report.total_documents == 1
+    assert report.parsed_documents == 1
+    assert report.total_cases >= 1
+
+
 def test_cli_synthetic_writes_report_to_selected_report_dir():
     report_dir = _repo_tmp_dir("reports")
 
@@ -289,6 +304,39 @@ def test_cli_existing_local_documents_writes_local_report():
 
     assert completed.returncode == 0, completed.stderr
     report_path = report_dir / "local_document_eval_report.md"
+    assert report_path.exists()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "# InsuranceRAG Local Document Evaluation Report" in report_text
+    assert "sample.pdf" in report_text
+
+
+def test_cli_existing_local_hard_negative_documents_writes_report():
+    workspace_tmp = _repo_tmp_dir("existing-local-hard-negative-documents")
+    docs_dir = workspace_tmp / "docs"
+    docs_dir.mkdir()
+    _write_pdf(
+        docs_dir / "sample.pdf",
+        "第六条 等待期\n等待期为九十日。\n第七条 保险期间\n保险期间为一年。\n第八条 责任免除\n酒后驾驶属于责任免除。",
+    )
+    report_dir = workspace_tmp / "reports"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_rag.py",
+            "--report-dir",
+            str(report_dir),
+            "--local-hard-negative",
+            str(docs_dir),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report_path = report_dir / "local_hard_negative_eval_report.md"
     assert report_path.exists()
     report_text = report_path.read_text(encoding="utf-8")
     assert "# InsuranceRAG Local Document Evaluation Report" in report_text

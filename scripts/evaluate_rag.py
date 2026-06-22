@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 from insurance_rag.config import AppConfig
 from insurance_rag.evaluation import (
     evaluate_hard_negative_cases,
+    evaluate_local_hard_negative_documents,
     evaluate_local_documents,
     evaluate_synthetic_cases,
     render_hard_negative_markdown_report,
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(config.eval_report_dir),
     )
     parser.add_argument("--local-documents", type=Path)
+    parser.add_argument("--local-hard-negative", type=Path)
     parser.add_argument("--local-sample-limit", type=int, default=20)
     parser.add_argument("--hard-negative", action="store_true")
     parser.add_argument(
@@ -46,9 +48,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.synthetic and not args.hard_negative and args.local_documents is None:
+    if (
+        not args.synthetic
+        and not args.hard_negative
+        and args.local_documents is None
+        and args.local_hard_negative is None
+    ):
         print(
-            "No evaluation selected. Use --synthetic, --hard-negative, or --local-documents."
+            "No evaluation selected. Use --synthetic, --hard-negative, --local-documents, or --local-hard-negative."
         )
         return 2
 
@@ -63,7 +70,11 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"Skipping local document evaluation: {args.local_documents} does not exist."
             )
-            local_failed = not args.synthetic
+            local_failed = (
+                not args.synthetic
+                and not args.hard_negative
+                and args.local_hard_negative is None
+            )
         else:
             local_report = evaluate_local_documents(
                 args.local_documents,
@@ -78,6 +89,33 @@ def main(argv: list[str] | None = None) -> int:
             local_failed = (
                 local_report.total_cases == 0
                 or local_report.top3_cases != local_report.total_cases
+            )
+
+    local_hard_failed = False
+    if args.local_hard_negative is not None:
+        if not args.local_hard_negative.exists():
+            print(
+                f"Skipping local hard negative evaluation: {args.local_hard_negative} does not exist."
+            )
+            local_hard_failed = (
+                not args.synthetic
+                and not args.hard_negative
+                and args.local_documents is None
+            )
+        else:
+            local_hard_report = evaluate_local_hard_negative_documents(
+                args.local_hard_negative,
+                sample_limit=config.hard_negative_local_limit,
+            )
+            local_hard_markdown = render_local_markdown_report(local_hard_report)
+            (report_dir / "local_hard_negative_eval_report.md").write_text(
+                local_hard_markdown,
+                encoding="utf-8",
+            )
+            print(local_hard_markdown)
+            local_hard_failed = (
+                local_hard_report.total_cases == 0
+                or local_hard_report.top3_cases != local_hard_report.total_cases
             )
 
     synthetic_failed = False
@@ -113,7 +151,11 @@ def main(argv: list[str] | None = None) -> int:
         print(hard_markdown)
         hard_negative_failed = hard_report.passed_cases != hard_report.total_cases
 
-    return 1 if synthetic_failed or local_failed or hard_negative_failed else 0
+    return (
+        1
+        if synthetic_failed or local_failed or hard_negative_failed or local_hard_failed
+        else 0
+    )
 
 
 if __name__ == "__main__":
