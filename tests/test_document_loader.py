@@ -11,6 +11,24 @@ from insurance_rag.document_loader import (
 from insurance_rag.models import PAGE_QUALITY_UNREADABLE
 
 
+def patch_single_page_pdf_text(mocker, text):
+    class FakePage:
+        def get_text(self, _format):
+            return text
+
+    class FakeDocument:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __iter__(self):
+            return iter((FakePage(),))
+
+    mocker.patch("insurance_rag.document_loader.fitz.open", return_value=FakeDocument())
+
+
 def test_garbled_ratio_counts_replacement_characters():
     assert garbled_ratio("abc��") == 0.4
 
@@ -99,21 +117,7 @@ def test_parse_pdf_bytes_keeps_text_pages_when_ocr_runtime_fails(mocker):
 def test_parse_pdf_bytes_marks_severely_garbled_text_unreadable_when_ocr_fails(
     mocker,
 ):
-    class FakePage:
-        def get_text(self, _format):
-            return "正常文字����"
-
-    class FakeDocument:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def __iter__(self):
-            return iter((FakePage(),))
-
-    mocker.patch("insurance_rag.document_loader.fitz.open", return_value=FakeDocument())
+    patch_single_page_pdf_text(mocker, "正常文字����")
     mocker.patch(
         "insurance_rag.document_loader._ocr_page",
         side_effect=ValueError("tesseract runtime failed"),
@@ -133,21 +137,7 @@ def test_parse_pdf_bytes_marks_severely_garbled_text_unreadable_when_ocr_fails(
 def test_parse_pdf_bytes_marks_severely_garbled_text_unreadable_when_ocr_disabled(
     mocker,
 ):
-    class FakePage:
-        def get_text(self, _format):
-            return "正常文字����"
-
-    class FakeDocument:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def __iter__(self):
-            return iter((FakePage(),))
-
-    mocker.patch("insurance_rag.document_loader.fitz.open", return_value=FakeDocument())
+    patch_single_page_pdf_text(mocker, "正常文字����")
     ocr = mocker.patch("insurance_rag.document_loader._ocr_page")
     config = AppConfig(
         openai_api_key=None,

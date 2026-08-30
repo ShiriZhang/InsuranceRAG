@@ -95,6 +95,7 @@ def _split_single_page_clauses(
         return []
 
     trusted_heading_starts: list[int] = []
+    rejected_heading_ends: list[int] = []
     cursor = 0
     for raw_line in text.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
@@ -103,6 +104,8 @@ def _split_single_page_clauses(
             metadata = parse_clause_metadata(candidate)
             leading_space = len(line) - len(line.lstrip())
             candidate_start = cursor + leading_space
+            if candidate_start in rejected_heading_offsets:
+                rejected_heading_ends.append(cursor + len(raw_line))
             if (
                 metadata.heading_confidence in {"high", "medium"}
                 and candidate_start not in rejected_heading_offsets
@@ -114,8 +117,11 @@ def _split_single_page_clauses(
     if not trusted_heading_starts or page_start < trusted_heading_starts[0]:
         starts.append(page_start)
     starts.extend(trusted_heading_starts)
+    starts.extend(
+        offset for offset in rejected_heading_ends if page_start < offset < page_end
+    )
 
-    unique_starts = list(dict.fromkeys(starts))
+    unique_starts = sorted(set(starts))
     clauses: list[tuple[str, int, int]] = []
     for index, start in enumerate(unique_starts):
         end = unique_starts[index + 1] if index + 1 < len(unique_starts) else page_end

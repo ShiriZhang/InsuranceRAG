@@ -498,6 +498,37 @@ def test_clause_v2_rejects_repeated_medium_heading_page_headers():
     ] == ["等待期", "责任免除"]
 
 
+def test_clause_v2_continues_body_after_rejected_repeated_page_header():
+    pages = (
+        DocumentPage(
+            page_number=1,
+            text="保险责任\n第六条 等待期\n等待期自合同生效日起计算。",
+            extraction_method="text",
+        ),
+        DocumentPage(
+            page_number=2,
+            text="保险责任\n等待期为九十日。",
+            extraction_method="text",
+        ),
+    )
+
+    chunks = chunk_pages(
+        pages,
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )
+
+    waiting_clause = next(chunk for chunk in chunks if chunk.section_title == "等待期")
+    assert waiting_clause.text == (
+        "第六条 等待期\n等待期自合同生效日起计算。\n等待期为九十日。"
+    )
+    assert [span.page_number for span in waiting_clause.source_spans] == [1, 2]
+    assert waiting_clause.retrieval_context == "Policy Clause: 第六条 等待期"
+
+
 def test_chunk_pages_attaches_high_confidence_clause_metadata():
     pages = (
         DocumentPage(
