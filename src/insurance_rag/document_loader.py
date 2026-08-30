@@ -79,13 +79,11 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
         for index, page in enumerate(document, start=1):
             raw_text = page.get_text("text")
             method = "text"
-            ocr_failed = False
             if config.ocr_enabled and needs_ocr(raw_text, config):
                 try:
                     raw_text = _ocr_page(page)
                     method = "ocr"
                 except Exception as exc:
-                    ocr_failed = True
                     warning_key = f"ocr_failed:{type(exc).__name__}:{exc}"
                     if warning_key not in warning_keys:
                         warnings.append(
@@ -100,19 +98,16 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                     extraction_method=method,
                 )
             )
-            if (
-                method == "ocr"
-                and garbled_ratio(normalized_page.text) > config.max_garbled_ratio
-            ):
+            final_text_is_severely_garbled = (
+                garbled_ratio(normalized_page.text) > config.max_garbled_ratio
+            )
+            if method == "ocr" and final_text_is_severely_garbled:
                 normalized_page = replace(
                     normalized_page,
                     quality_notes=normalized_page.quality_notes
                     + (PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,),
                 )
-            elif (
-                ocr_failed
-                and garbled_ratio(normalized_page.text) > config.max_garbled_ratio
-            ):
+            elif final_text_is_severely_garbled:
                 normalized_page = replace(
                     normalized_page,
                     quality_notes=normalized_page.quality_notes
