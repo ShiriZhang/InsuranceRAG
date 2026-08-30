@@ -298,12 +298,12 @@ def test_clause_v2_packs_complete_numbered_items_toward_soft_target():
         chunk_size=900,
         overlap=0,
         strategy="clause_v2",
-        target_chars=26,
-        hard_max_chars=32,
+        target_chars=50,
+        hard_max_chars=56,
     )
 
     assert [chunk.text for chunk in chunks] == [
-        "第六条 保险责任\n一、给付身故保险金。\n二、给付全残保险金。\n",
+        "第六条 保险责任\n一、给付身故保险金。\n二、给付全残保险金。",
         "三、给付疾病保险金。",
     ]
     assert all(
@@ -326,11 +326,11 @@ def test_clause_v2_does_not_emit_heading_without_governed_body():
         chunk_size=900,
         overlap=0,
         strategy="clause_v2",
-        target_chars=9,
-        hard_max_chars=24,
+        target_chars=33,
+        hard_max_chars=48,
     )
 
-    assert chunks[0].text == "第六条 保险责任\n一、给付身故保险金。\n"
+    assert chunks[0].text == "第六条 保险责任\n一、给付身故保险金。"
     assert all(chunk.text.strip() != "第六条 保险责任" for chunk in chunks)
 
 
@@ -349,11 +349,11 @@ def test_clause_v2_uses_observable_windows_for_indivisible_overlong_sentence():
         chunk_size=900,
         overlap=0,
         strategy="clause_v2",
-        target_chars=16,
-        hard_max_chars=20,
+        target_chars=40,
+        hard_max_chars=44,
     )
 
-    assert all(len(chunk.text) <= 20 for chunk in chunks)
+    assert all(len(chunk.retrieval_text) <= 44 for chunk in chunks)
     assert any(
         "character_window_fallback" in chunk.boundary_diagnostics
         for chunk in chunks
@@ -404,11 +404,7 @@ def test_clause_v2_reconstruction_and_clause_purity_hold_across_boundary_modes()
                 assert page.text[span.start_char : span.end_char] == span.text
                 for offset in range(span.start_char, span.end_char):
                     coverage[offset] += 1
-        assert all(
-            count == 1
-            for character, count in zip(page.text, coverage)
-            if not character.isspace()
-        )
+        assert coverage == [1] * len(page.text)
 
     assert all(
         not ("第六条 等待期" in chunk.text and "第七条 责任免除" in chunk.text)
@@ -438,7 +434,7 @@ def test_clause_v2_source_spans_are_exact_slices_of_original_page_text():
     for chunk in chunks:
         span = chunk.source_spans[0]
         assert page_text[span.start_char : span.end_char] == span.text
-        assert span.text == chunk.text
+        assert span.text.strip() == chunk.text
 
 
 def test_clause_v2_keeps_low_confidence_heading_mentions_in_diagnostics():

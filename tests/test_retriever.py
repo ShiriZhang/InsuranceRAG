@@ -130,8 +130,8 @@ def test_clause_v2_representative_policy_builds_production_equivalent_index():
         chunk_size=900,
         overlap=0,
         strategy="clause_v2",
-        target_chars=16,
-        hard_max_chars=24,
+        target_chars=40,
+        hard_max_chars=48,
     )
     embedder = FakeEmbedder()
 
@@ -140,3 +140,4 @@ def test_clause_v2_representative_policy_builds_production_equivalent_index():
     assert index.chunks == chunks
     assert embedder.calls == [[chunk.retrieval_text for chunk in chunks]]
     assert all(chunk.index_compatibility_key == "chunking:clause_v2" for chunk in chunks)
+    assert all(len(chunk.retrieval_text) <= 48 for chunk in chunks)

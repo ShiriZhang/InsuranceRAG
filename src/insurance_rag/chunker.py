@@ -89,9 +89,9 @@ def _split_single_page_clauses(
     text: str,
     rejected_heading_offsets: set[int],
 ) -> list[tuple[str, int, int]]:
-    page_start = len(text) - len(text.lstrip())
-    page_end = len(text.rstrip())
-    if page_start >= page_end:
+    page_start = 0
+    page_end = len(text)
+    if not text.strip():
         return []
 
     trusted_heading_starts: list[int] = []
@@ -114,8 +114,12 @@ def _split_single_page_clauses(
         cursor += len(raw_line)
 
     starts: list[int] = []
-    if not trusted_heading_starts or page_start < trusted_heading_starts[0]:
+    if not trusted_heading_starts:
         starts.append(page_start)
+    elif text[: trusted_heading_starts[0]].strip():
+        starts.append(page_start)
+    else:
+        trusted_heading_starts[0] = page_start
     starts.extend(trusted_heading_starts)
     starts.extend(
         offset for offset in rejected_heading_ends if page_start < offset < page_end
@@ -125,9 +129,7 @@ def _split_single_page_clauses(
     clauses: list[tuple[str, int, int]] = []
     for index, start in enumerate(unique_starts):
         end = unique_starts[index + 1] if index + 1 < len(unique_starts) else page_end
-        while end > start and text[end - 1].isspace():
-            end -= 1
-        if end > start:
+        if text[start:end].strip():
             clauses.append((text[start:end], start, end))
     return clauses
 
@@ -244,14 +246,26 @@ def _split_clause_v2_chunk(
     target_chars: int,
     hard_max_chars: int,
 ) -> list[DocumentChunk]:
+    retrieval_prefix_chars = (
+        len(chunk.retrieval_context) + 1 if chunk.retrieval_context else 0
+    )
+    body_hard_max_chars = hard_max_chars - retrieval_prefix_chars
+    if body_hard_max_chars <= 0:
+        raise ValueError(
+            "hard_max_chars must exceed clause heading retrieval context length"
+        )
+    body_target_chars = max(1, target_chars - retrieval_prefix_chars)
+
     semantic_units: list[tuple[list[SourceSpan], bool]] = []
     for source_span in chunk.source_spans:
         for semantic_span in _split_source_span_at_semantic_boundaries(source_span):
-            if len(semantic_span.text) <= hard_max_chars:
+            if len(semantic_span.text.strip()) <= body_hard_max_chars:
                 semantic_units.append(([semantic_span], False))
                 continue
-            for offset in range(0, len(semantic_span.text), hard_max_chars):
-                window_text = semantic_span.text[offset : offset + hard_max_chars]
+            for offset in range(0, len(semantic_span.text), body_hard_max_chars):
+                window_text = semantic_span.text[
+                    offset : offset + body_hard_max_chars
+                ]
                 semantic_units.append(
                     (
                         [
@@ -273,19 +287,19 @@ def _split_clause_v2_chunk(
     current_uses_window = False
     for unit_spans, uses_window in semantic_units:
         candidate_spans = current_spans + unit_spans
-        candidate_length = len(_spans_text(candidate_spans))
-        if current_spans and candidate_length > target_chars:
-            current_length = len(_spans_text(current_spans))
+        candidate_length = len(_spans_text(candidate_spans).strip())
+        if current_spans and candidate_length > body_target_chars:
+            current_length = len(_spans_text(current_spans).strip())
             current_is_bare_heading = (
                 chunk.heading_text is not None
                 and _spans_text(current_spans).strip() == chunk.heading_text.strip()
             )
             candidate_is_closer = (
-                candidate_length <= hard_max_chars
+                candidate_length <= body_hard_max_chars
                 and (
                     current_is_bare_heading
-                    or candidate_length - target_chars
-                    < target_chars - current_length
+                    or candidate_length - body_target_chars
+                    < body_target_chars - current_length
                 )
             )
             if candidate_is_closer:
@@ -312,7 +326,7 @@ def _split_clause_v2_chunk(
         split_chunks.append(
             replace(
                 chunk,
-                text=_spans_text(coalesced_spans),
+                text=_spans_text(coalesced_spans).strip(),
                 page_number=coalesced_spans[0].page_number,
                 source_spans=coalesced_spans,
                 boundary_diagnostics=diagnostics,
