@@ -90,10 +90,44 @@ def test_parse_pdf_bytes_keeps_text_pages_when_ocr_runtime_fails(mocker):
     assert "第 1 页" in result.warnings[0]
     assert result.pages[0].text == "A"
     assert result.pages[0].extraction_method == "text"
-    assert PAGE_QUALITY_UNREADABLE in result.pages[0].quality_notes
+    assert PAGE_QUALITY_UNREADABLE not in result.pages[0].quality_notes
     assert result.pages[1].text == "B"
     assert result.pages[1].extraction_method == "text"
-    assert PAGE_QUALITY_UNREADABLE in result.pages[1].quality_notes
+    assert PAGE_QUALITY_UNREADABLE not in result.pages[1].quality_notes
+
+
+def test_parse_pdf_bytes_marks_severely_garbled_text_unreadable_when_ocr_fails(
+    mocker,
+):
+    class FakePage:
+        def get_text(self, _format):
+            return "正常文字����"
+
+    class FakeDocument:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __iter__(self):
+            return iter((FakePage(),))
+
+    mocker.patch("insurance_rag.document_loader.fitz.open", return_value=FakeDocument())
+    mocker.patch(
+        "insurance_rag.document_loader._ocr_page",
+        side_effect=ValueError("tesseract runtime failed"),
+    )
+    config = AppConfig(
+        openai_api_key=None,
+        max_garbled_ratio=0.2,
+        ocr_enabled=True,
+    )
+
+    result = parse_pdf_bytes(b"fake-pdf", "policy.pdf", config)
+
+    assert result.pages[0].text == "正常文字����"
+    assert PAGE_QUALITY_UNREADABLE in result.pages[0].quality_notes
 
 
 def test_parse_pdf_bytes_marks_ocr_text_with_severe_remaining_garbling(mocker):

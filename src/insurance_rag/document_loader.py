@@ -109,7 +109,10 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                     quality_notes=normalized_page.quality_notes
                     + (PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,),
                 )
-            elif ocr_failed and needs_ocr(normalized_page.text, config):
+            elif (
+                ocr_failed
+                and garbled_ratio(normalized_page.text) > config.max_garbled_ratio
+            ):
                 normalized_page = replace(
                     normalized_page,
                     quality_notes=normalized_page.quality_notes
