@@ -115,4 +115,9 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                 )
             pages.append(normalized_page)
 
-    return ParseResult(filename=Path(filename).name, pages=tuple(pages), warnings=tuple(warnings))
+    portable_filename = Path(filename.replace("\\", "/")).name
+    return ParseResult(
+        filename=portable_filename,
+        pages=tuple(pages),
+        warnings=tuple(warnings),
+    )
