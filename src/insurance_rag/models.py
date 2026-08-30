@@ -5,6 +5,25 @@ from enum import Enum
 CHUNKING_STRATEGIES = frozenset({"legacy", "clause_v2"})
 PAGE_QUALITY_UNREADABLE = "unreadable_page"
 PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY = "severe_ocr_uncertainty"
+BOUNDARY_LEGACY_PAGE_LINE_PACKING = "legacy_page_line_packing"
+BOUNDARY_UNKNOWN_CLAUSE_PAGE_FALLBACK = "unknown_clause_page_fallback"
+BOUNDARY_LOW_CONFIDENCE_HEADING_CANDIDATE = "low_confidence_heading_candidate"
+BOUNDARY_REJECTED_PAGE_HEADER_FOOTER = "rejected_page_header_footer"
+BOUNDARY_CROSS_PAGE_CLAUSE_CONTINUATION = "cross_page_clause_continuation"
+BOUNDARY_CHARACTER_WINDOW_FALLBACK = "character_window_fallback"
+BOUNDARY_PAGE_GAP_EMPTY = "page_gap:empty"
+BOUNDARY_PAGE_GAP_UNREADABLE = "page_gap:unreadable"
+BOUNDARY_PAGE_GAP_SEVERE_OCR_UNCERTAINTY = "page_gap:severe_ocr_uncertainty"
+
+
+def authoritative_source_text(
+    source_spans: tuple["SourceSpan", ...],
+    *,
+    fallback: str,
+) -> str:
+    if not source_spans:
+        return fallback
+    return "\n".join(span.text for span in source_spans)
 
 
 @dataclass(frozen=True)
@@ -59,9 +78,7 @@ class DocumentChunk:
 
     @property
     def authoritative_text(self) -> str:
-        if not self.source_spans:
-            return self.text
-        return "\n".join(span.text for span in self.source_spans)
+        return authoritative_source_text(self.source_spans, fallback=self.text)
 
     @property
     def authoritative_page_number(self) -> int | None:
@@ -86,9 +103,7 @@ class Citation:
 
     @property
     def authoritative_text(self) -> str:
-        if not self.source_spans:
-            return self.excerpt
-        return "\n".join(span.text for span in self.source_spans)
+        return authoritative_source_text(self.source_spans, fallback=self.excerpt)
 
     @property
     def page_numbers(self) -> tuple[int, ...]:

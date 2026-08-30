@@ -7,6 +7,15 @@ from insurance_rag.clause_parser import (
     parse_clause_metadata,
 )
 from insurance_rag.models import (
+    BOUNDARY_CHARACTER_WINDOW_FALLBACK,
+    BOUNDARY_CROSS_PAGE_CLAUSE_CONTINUATION,
+    BOUNDARY_LEGACY_PAGE_LINE_PACKING,
+    BOUNDARY_LOW_CONFIDENCE_HEADING_CANDIDATE,
+    BOUNDARY_PAGE_GAP_EMPTY,
+    BOUNDARY_PAGE_GAP_SEVERE_OCR_UNCERTAINTY,
+    BOUNDARY_PAGE_GAP_UNREADABLE,
+    BOUNDARY_REJECTED_PAGE_HEADER_FOOTER,
+    BOUNDARY_UNKNOWN_CLAUSE_PAGE_FALLBACK,
     CHUNKING_STRATEGIES,
     ClauseMetadata,
     DocumentChunk,
@@ -163,11 +172,11 @@ def _rejected_page_edge_medium_offsets(
 
 def _unsafe_page_gap_diagnostic(page: DocumentPage) -> str | None:
     if not page.text.strip():
-        return "page_gap:empty"
+        return BOUNDARY_PAGE_GAP_EMPTY
     if PAGE_QUALITY_UNREADABLE in page.quality_notes:
-        return "page_gap:unreadable"
+        return BOUNDARY_PAGE_GAP_UNREADABLE
     if PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY in page.quality_notes:
-        return "page_gap:severe_ocr_uncertainty"
+        return BOUNDARY_PAGE_GAP_SEVERE_OCR_UNCERTAINTY
     return None
 
 
@@ -292,7 +301,7 @@ def _split_clause_v2_chunk(
         diagnostics = chunk.boundary_diagnostics
         if uses_window:
             diagnostics = tuple(
-                dict.fromkeys(diagnostics + ("character_window_fallback",))
+                dict.fromkeys(diagnostics + (BOUNDARY_CHARACTER_WINDOW_FALLBACK,))
             )
         split_chunks.append(
             replace(
@@ -339,7 +348,7 @@ def _chunk_legacy_pages(
                     heading_text=metadata.heading_text,
                     heading_confidence=metadata.heading_confidence,
                     heading_source=metadata.heading_source,
-                    boundary_diagnostics=("legacy_page_line_packing",),
+                    boundary_diagnostics=(BOUNDARY_LEGACY_PAGE_LINE_PACKING,),
                 )
             )
     return tuple(chunks)
@@ -400,11 +409,11 @@ def _chunk_clause_v2_pages(
                 )
             else:
                 retrieval_context = ""
-                boundary_diagnostics = ("unknown_clause_page_fallback",)
+                boundary_diagnostics = (BOUNDARY_UNKNOWN_CLAUSE_PAGE_FALLBACK,)
             if _has_low_confidence_heading_candidate(part):
-                boundary_diagnostics += ("low_confidence_heading_candidate",)
+                boundary_diagnostics += (BOUNDARY_LOW_CONFIDENCE_HEADING_CANDIDATE,)
             if rejected_in_part:
-                boundary_diagnostics += ("rejected_page_header_footer",)
+                boundary_diagnostics += (BOUNDARY_REJECTED_PAGE_HEADER_FOOTER,)
             boundary_diagnostics += pending_gap_diagnostics
 
             chunk = DocumentChunk(
@@ -456,7 +465,7 @@ def _chunk_clause_v2_pages(
                     boundary_diagnostics=tuple(
                         dict.fromkeys(
                             active_chunk.boundary_diagnostics
-                            + ("cross_page_clause_continuation",)
+                            + (BOUNDARY_CROSS_PAGE_CLAUSE_CONTINUATION,)
                         )
                     ),
                 )

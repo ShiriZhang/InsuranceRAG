@@ -8,6 +8,7 @@ from insurance_rag.document_loader import (
     normalize_page_text,
     parse_pdf_bytes,
 )
+from insurance_rag.models import PAGE_QUALITY_UNREADABLE
 
 
 def test_garbled_ratio_counts_replacement_characters():
@@ -89,8 +90,10 @@ def test_parse_pdf_bytes_keeps_text_pages_when_ocr_runtime_fails(mocker):
     assert "第 1 页" in result.warnings[0]
     assert result.pages[0].text == "A"
     assert result.pages[0].extraction_method == "text"
+    assert PAGE_QUALITY_UNREADABLE in result.pages[0].quality_notes
     assert result.pages[1].text == "B"
     assert result.pages[1].extraction_method == "text"
+    assert PAGE_QUALITY_UNREADABLE in result.pages[1].quality_notes
 
 
 def test_parse_pdf_bytes_marks_ocr_text_with_severe_remaining_garbling(mocker):
