@@ -17,17 +17,21 @@ ROOT = Path(__file__).parents[1]
 
 def test_committed_silver_generation_config_freezes_issue_16_decisions():
     config = load_silver_generation_config(
-        ROOT / "configs" / "silver_dataset_v1.json"
+        ROOT / "configs" / "silver_dataset_v2.json"
     )
 
     assert config.document_split_version == "silver-document-split/v1.0.0"
-    assert config.benchmark_version == "silver-evidence-benchmark/v1.0.0"
-    assert config.release_version == "clause-v2-silver/v1.0.0"
-    assert config.annotator_a.model_id == "openai/gpt-oss-120b"
-    assert config.annotator_b.model_id == "openai/gpt-oss-20b"
-    assert config.adjudicator.model_id == "openai/gpt-oss-120b"
-    assert config.annotator_a.temperature == 0
-    assert config.adjudicator.reasoning_effort == "medium"
+    assert config.benchmark_version == "silver-evidence-benchmark/v2.0.0"
+    assert config.release_version == "clause-v2-silver/v2.0.0"
+    assert config.annotator_a.model_id == "deepseek-v4-flash"
+    assert config.annotator_b.model_id == "deepseek-v4-flash"
+    assert config.adjudicator.model_id == "deepseek-v4-flash"
+    assert config.annotator_a.reasoning_effort == "low"
+    assert config.annotator_b.reasoning_effort == "none"
+    assert config.adjudicator.reasoning_effort == "high"
+    assert config.annotator_a.max_output_tokens == 8192
+    assert config.annotator_b.max_output_tokens == 4096
+    assert config.adjudicator.max_output_tokens == 16384
     assert config.size_grid == ((600, 900), (900, 1200), (1200, 1600))
     assert config.context_token_budgets == (2000, 4000, 8000)
     assert config.primary_context_token_budget == 4000
@@ -41,7 +45,7 @@ def test_committed_silver_generation_config_freezes_issue_16_decisions():
 
 def test_generation_config_rejects_prompt_version_mismatch():
     payload = json.loads(
-        (ROOT / "configs" / "silver_dataset_v1.json").read_text(
+        (ROOT / "configs" / "silver_dataset_v2.json").read_text(
             encoding="utf-8"
         )
     )
@@ -56,7 +60,7 @@ def test_generation_config_rejects_prompt_version_mismatch():
 
 def test_generation_config_rejects_schema_version_mismatch():
     payload = json.loads(
-        (ROOT / "configs" / "silver_dataset_v1.json").read_text(
+        (ROOT / "configs" / "silver_dataset_v2.json").read_text(
             encoding="utf-8"
         )
     )
@@ -71,7 +75,7 @@ def test_generation_config_rejects_schema_version_mismatch():
 
 def test_generation_config_rejects_normalization_implementation_mismatch():
     payload = json.loads(
-        (ROOT / "configs" / "silver_dataset_v1.json").read_text(
+        (ROOT / "configs" / "silver_dataset_v2.json").read_text(
             encoding="utf-8"
         )
     )

@@ -23,7 +23,7 @@ from insurance_rag.silver_generation import load_silver_generation_config
 
 def main() -> int:
     config = load_silver_generation_config(
-        ROOT / "configs" / "silver_dataset_v1.json"
+        ROOT / "configs" / "silver_dataset_v2.json"
     )
     inventory = build_approved_corpus_inventory(
         ROOT / "documents",

@@ -99,6 +99,9 @@ class AnnotationResponseMetadata:
     prompt_tokens: int
     completion_tokens: int
     draft_order: tuple[str, ...] = ()
+    returned_model: str | None = None
+    response_status: str | None = None
+    incomplete_reason: str | None = None
 
 
 @dataclass(frozen=True)

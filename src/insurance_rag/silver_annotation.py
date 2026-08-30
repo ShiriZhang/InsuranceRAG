@@ -31,16 +31,13 @@ class EvidenceCaseRequest:
 
 
 @dataclass(frozen=True)
-class GroqPassConfig:
+class AnnotationPassConfig:
     annotator_id: str
     model_id: str
     prompt_version: str
     schema_version: str
     reasoning_effort: str
-    temperature: float
-    top_p: float
-    seed: int
-    max_completion_tokens: int
+    max_output_tokens: int
     max_retries: int = 2
     normalization_version: str = "normalized-page-text/v1.0.0"
     input_char_limit: int = 100_000
@@ -48,42 +45,45 @@ class GroqPassConfig:
 
 
 @dataclass(frozen=True)
-class GroqCompletion:
+class AnnotationCompletion:
     response_id: str
     system_fingerprint: str | None
     content: str
     prompt_tokens: int
     completion_tokens: int
+    returned_model: str | None = None
+    response_status: str | None = None
+    incomplete_reason: str | None = None
     request_timestamp: str | None = None
     retry_count: int = 0
 
 
-class GroqChatClient(Protocol):
-    def create_completion(self, **request: object) -> GroqCompletion: ...
+class AnnotationClient(Protocol):
+    def create_completion(self, **request: object) -> AnnotationCompletion: ...
 
 
-class OpenAIGroqChatClient:
+class RetryableAnnotationResponseError(ValueError):
+    """The provider returned content that may succeed on a fresh request."""
+
+
+class OpenAIDeepSeekResponsesClient:
     def __init__(self, sdk_client: object) -> None:
         self._sdk_client = sdk_client
 
-    def create_completion(self, **request: object) -> GroqCompletion:
-        groq_options = {}
-        for option_name in ("reasoning_format", "service_tier"):
-            if option_name in request:
-                groq_options[option_name] = request.pop(option_name)
-        if groq_options:
-            existing_extra = request.pop("extra_body", {})
-            request["extra_body"] = {**existing_extra, **groq_options}
-        response = self._sdk_client.chat.completions.create(**request)
-        content = response.choices[0].message.content
+    def create_completion(self, **request: object) -> AnnotationCompletion:
+        response = self._sdk_client.responses.create(**request)
+        content = response.output_text
         if not isinstance(content, str):
-            raise ValueError("Groq completion did not return text content.")
-        return GroqCompletion(
+            raise ValueError("DeepSeek response did not return text content.")
+        return AnnotationCompletion(
             response_id=response.id,
             system_fingerprint=getattr(response, "system_fingerprint", None),
             content=content,
-            prompt_tokens=response.usage.prompt_tokens,
-            completion_tokens=response.usage.completion_tokens,
+            prompt_tokens=response.usage.input_tokens,
+            completion_tokens=response.usage.output_tokens,
+            returned_model=getattr(response, "model", None),
+            response_status=getattr(response, "status", None),
+            incomplete_reason=_incomplete_reason(response),
         )
 
 
@@ -100,14 +100,14 @@ class JsonAnnotationCheckpointStore:
         annotator_id: str,
         source_id: str,
         request_sha256: str,
-    ) -> GroqCompletion | None:
+    ) -> AnnotationCompletion | None:
         path = self._path(annotator_id, source_id)
         if not path.is_file():
             return None
         record = json.loads(path.read_text(encoding="utf-8"))
         if record.get("request_sha256") != request_sha256:
             return None
-        return GroqCompletion(**record["completion"])
+        return AnnotationCompletion(**record["completion"])
 
     def save(
         self,
@@ -115,7 +115,7 @@ class JsonAnnotationCheckpointStore:
         annotator_id: str,
         source_id: str,
         request_sha256: str,
-        completion: GroqCompletion,
+        completion: AnnotationCompletion,
     ) -> None:
         path = self._path(annotator_id, source_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,12 +140,12 @@ class JsonAnnotationCheckpointStore:
         return self._root / annotator_key / f"{source_key}.json"
 
 
-class GroqAnnotationPass:
+class AnnotationPass:
     def __init__(
         self,
         *,
-        client: GroqChatClient,
-        config: GroqPassConfig,
+        client: AnnotationClient,
+        config: AnnotationPassConfig,
         prompt_text: str,
         case_requests: CaseRequestFactory,
         checkpoint_store: JsonAnnotationCheckpointStore | None = None,
@@ -163,23 +163,12 @@ class GroqAnnotationPass:
     def __call__(self, source: BenchmarkSource) -> tuple[AnnotationDraft, ...]:
         requests = self._case_requests(source)
         if not requests:
-            raise ValueError("Groq annotation requires at least one evidence case request.")
+            raise ValueError("Annotation requires at least one evidence case request.")
         _validate_case_requests(requests)
         messages = _annotation_messages(source, requests, self._prompt_text)
         _validate_input_size(messages, self._input_char_limit)
-        completion_request = dict(
-            model=self._config.model_id,
-            messages=messages,
-            temperature=self._config.temperature,
-            top_p=self._config.top_p,
-            seed=self._config.seed,
-            max_completion_tokens=self._config.max_completion_tokens,
-            reasoning_effort=self._config.reasoning_effort,
-            reasoning_format="hidden",
-            service_tier="on_demand",
-            stream=False,
-            n=1,
-            response_format=_response_format(self._response_schema),
+        completion_request = _responses_request(
+            self._config, messages, self._response_schema
         )
         request_sha256 = _sha256(
             json.dumps(
@@ -212,7 +201,7 @@ class GroqAnnotationPass:
         payload = json.loads(completion.content)
         raw_cases = payload.get("cases")
         if not isinstance(raw_cases, list):
-            raise ValueError("Groq annotation response requires a cases array.")
+            raise ValueError("Annotation response requires a cases array.")
         case_by_slot = {
             str(case.get("slot_id")): case
             for case in raw_cases
@@ -220,7 +209,7 @@ class GroqAnnotationPass:
         }
         expected_slots = {request.slot_id for request in requests}
         if set(case_by_slot) != expected_slots:
-            raise ValueError("Groq annotation response slots do not match the request.")
+            raise ValueError("Annotation response slots do not match the request.")
 
         stable_metadata = _annotation_metadata(
             self._config, self._prompt_text, self._response_schema
@@ -237,12 +226,12 @@ class GroqAnnotationPass:
             for request in requests
         )
 
-class GroqAdjudicationPass:
+class AdjudicationPass:
     def __init__(
         self,
         *,
-        client: GroqChatClient,
-        config: GroqPassConfig,
+        client: AnnotationClient,
+        config: AnnotationPassConfig,
         prompt_text: str,
         checkpoint_store: JsonAnnotationCheckpointStore | None = None,
         response_schema: Mapping[str, object] | None = None,
@@ -286,19 +275,8 @@ class GroqAdjudicationPass:
             sort_keys=True,
         )
         _validate_input_size(messages, self._input_char_limit)
-        completion_request = dict(
-            model=self._config.model_id,
-            messages=messages,
-            temperature=self._config.temperature,
-            top_p=self._config.top_p,
-            seed=self._config.seed,
-            max_completion_tokens=self._config.max_completion_tokens,
-            reasoning_effort=self._config.reasoning_effort,
-            reasoning_format="hidden",
-            service_tier="on_demand",
-            stream=False,
-            n=1,
-            response_format=_response_format(self._response_schema),
+        completion_request = _responses_request(
+            self._config, messages, self._response_schema
         )
         request_sha256 = _sha256(
             json.dumps(
@@ -332,13 +310,13 @@ class GroqAdjudicationPass:
         payload = json.loads(completion.content)
         raw_cases = payload.get("cases")
         if not isinstance(raw_cases, list) or len(raw_cases) != 1:
-            raise ValueError("Groq adjudication response requires exactly one case.")
+            raise ValueError("Adjudication response requires exactly one case.")
         raw_case = raw_cases[0]
         if (
             not isinstance(raw_case, dict)
             or raw_case.get("slot_id") != "adjudication"
         ):
-            raise ValueError("Groq adjudication response has an invalid slot.")
+            raise ValueError("Adjudication response has an invalid slot.")
         metadata = _annotation_metadata(
             self._config, self._prompt_text, self._response_schema
         )
@@ -359,14 +337,15 @@ class GroqAdjudicationPass:
 
 
 def _create_with_retries(
-    client: GroqChatClient,
-    config: GroqPassConfig,
+    client: AnnotationClient,
+    config: AnnotationPassConfig,
     completion_request: dict[str, object],
-) -> GroqCompletion:
+) -> AnnotationCompletion:
     for retry_count in range(config.max_retries + 1):
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
             completion = client.create_completion(**completion_request)
+            _validate_completion_content(completion)
             return replace(
                 completion,
                 request_timestamp=timestamp,
@@ -376,11 +355,11 @@ def _create_with_retries(
             if retry_count >= config.max_retries or not _is_retryable(error):
                 raise
             time.sleep(_retry_delay_seconds(error, retry_count))
-    raise RuntimeError("Groq retry loop exited unexpectedly.")
+    raise RuntimeError("Annotation retry loop exited unexpectedly.")
 
 
 def _annotation_metadata(
-    config: GroqPassConfig,
+    config: AnnotationPassConfig,
     prompt_text: str,
     response_schema: Mapping[str, object],
 ) -> AnnotationMetadata:
@@ -393,17 +372,11 @@ def _annotation_metadata(
             ("schema_sha256", _schema_sha256(response_schema)),
             ("prompt_sha256", _sha256(prompt_text)),
             ("reasoning_effort", config.reasoning_effort),
-            ("temperature", config.temperature),
-            ("top_p", config.top_p),
-            ("seed", config.seed),
-            ("max_completion_tokens", config.max_completion_tokens),
+            ("max_output_tokens", config.max_output_tokens),
             ("normalization_version", config.normalization_version),
             ("input_char_limit", config.input_char_limit),
             ("transport_window_char_limit", config.transport_window_char_limit),
-            ("reasoning_format", "hidden"),
-            ("service_tier", "on_demand"),
-            ("stream", False),
-            ("n", 1),
+            ("api", "responses"),
             ("tools", "none"),
             ("response_format", "strict_json_schema"),
         ),
@@ -411,7 +384,7 @@ def _annotation_metadata(
 
 
 def _response_metadata(
-    completion: GroqCompletion,
+    completion: AnnotationCompletion,
 ) -> AnnotationResponseMetadata:
     return AnnotationResponseMetadata(
         response_id=completion.response_id,
@@ -420,6 +393,9 @@ def _response_metadata(
         retry_count=completion.retry_count,
         prompt_tokens=completion.prompt_tokens,
         completion_tokens=completion.completion_tokens,
+        returned_model=completion.returned_model,
+        response_status=completion.response_status,
+        incomplete_reason=completion.incomplete_reason,
     )
 
 def _annotation_messages(
@@ -617,21 +593,33 @@ def _default_response_schema() -> dict[str, object]:
 def _response_format(schema: Mapping[str, object]) -> dict[str, object]:
     return {
         "type": "json_schema",
-        "json_schema": {
-            "name": "silver_evidence_annotation_v1",
-            "strict": True,
-            "schema": schema,
-        },
+        "name": "silver_evidence_annotation_v1",
+        "strict": True,
+        "schema": schema,
+    }
+
+
+def _responses_request(
+    config: AnnotationPassConfig,
+    messages: list[dict[str, str]],
+    schema: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "model": config.model_id,
+        "input": messages,
+        "max_output_tokens": config.max_output_tokens,
+        "reasoning": {"effort": config.reasoning_effort},
+        "text": {"format": _response_format(schema)},
     }
 
 
 def _validate_input_size(messages: list[dict[str, str]], limit: int) -> None:
     if limit <= 0:
-        raise ValueError("Groq input character limit must be positive.")
+        raise ValueError("Annotation input character limit must be positive.")
     character_count = sum(len(message["content"]) for message in messages)
     if character_count > limit:
         raise ValueError(
-            "Groq annotation input character limit exceeded: "
+            "Annotation input character limit exceeded: "
             f"{character_count} > {limit}. Create deterministic page windows "
             "instead of truncating the policy."
         )
@@ -644,10 +632,43 @@ def _schema_sha256(schema: Mapping[str, object]) -> str:
 
 
 def _is_retryable(error: Exception) -> bool:
+    if isinstance(error, RetryableAnnotationResponseError):
+        return True
+    if isinstance(error, (ValueError, json.JSONDecodeError)):
+        return False
     status_code = getattr(error, "status_code", None)
     if status_code is None:
         return True
     return status_code == 429 or status_code >= 500
+
+
+def _validate_completion_content(completion: AnnotationCompletion) -> None:
+    if not completion.content.strip():
+        reason = completion.incomplete_reason or completion.response_status or "unknown"
+        raise RetryableAnnotationResponseError(
+            "Annotation response returned empty JSON; "
+            f"incomplete reason: {reason}. Increase max_output_tokens."
+        )
+    try:
+        payload = json.loads(completion.content)
+    except json.JSONDecodeError as error:
+        raise RetryableAnnotationResponseError(
+            "Annotation response was not valid JSON."
+        ) from error
+    if not isinstance(payload, dict):
+        raise RetryableAnnotationResponseError(
+            "Annotation response JSON must be an object."
+        )
+
+
+def _incomplete_reason(response: object) -> str | None:
+    details = getattr(response, "incomplete_details", None)
+    if details is None:
+        return None
+    reason = getattr(details, "reason", None)
+    if reason is None and isinstance(details, Mapping):
+        reason = details.get("reason")
+    return str(reason) if reason is not None else None
 
 
 def _retry_delay_seconds(error: Exception, retry_count: int) -> float:

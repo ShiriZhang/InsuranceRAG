@@ -19,11 +19,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from insurance_rag.config import AppConfig
-from insurance_rag.groq_silver_annotation import (
-    GroqAdjudicationPass,
-    GroqAnnotationPass,
+from insurance_rag.silver_annotation import (
+    AdjudicationPass,
+    AnnotationPass,
     JsonAnnotationCheckpointStore,
-    OpenAIGroqChatClient,
+    OpenAIDeepSeekResponsesClient,
 )
 from insurance_rag.silver_benchmark import generate_frozen_benchmark
 from insurance_rag.silver_corpus import (
@@ -42,12 +42,12 @@ from insurance_rag.silver_generation import (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Freeze the approved local PDF corpus and generate Silver labels with Groq."
+        description="Freeze the approved local PDF corpus and generate Silver labels with DeepSeek."
     )
     parser.add_argument(
         "--config",
         type=Path,
-        default=ROOT / "configs" / "silver_dataset_v1.json",
+        default=ROOT / "configs" / "silver_dataset_v2.json",
     )
     parser.add_argument("--documents", type=Path, default=ROOT / "documents")
     parser.add_argument(
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=ROOT / "silver_benchmark_data" / "groq_checkpoints_v1",
+        default=ROOT / "silver_benchmark_data" / "deepseek_checkpoints_v2",
     )
     parser.add_argument(
         "--prepare-only",
@@ -103,9 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     load_dotenv(ROOT / ".env", override=False)
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        raise RuntimeError("GROQ_API_KEY is required; OPENAI_API_KEY is not used.")
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not deepseek_api_key:
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY is required; GROQ_API_KEY and OPENAI_API_KEY are not used."
+        )
 
     annotator_prompt = (ROOT / "prompts" / "silver_evidence_annotator_v1.md").read_text(
         encoding="utf-8"
@@ -120,12 +122,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("Schema $id does not match the frozen schema version.")
 
     sdk_client = OpenAI(
-        api_key=groq_api_key,
-        base_url="https://api.groq.com/openai/v1",
+        api_key=deepseek_api_key,
+        base_url="https://api.deepseek.com",
         timeout=120.0,
         max_retries=0,
     )
-    client = OpenAIGroqChatClient(sdk_client)
+    client = OpenAIDeepSeekResponsesClient(sdk_client)
     checkpoint_store = JsonAnnotationCheckpointStore(checkpoint_dir)
     case_plan = build_evidence_case_plan(
         document_split,
@@ -180,8 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     runtime = {
-        "provider": "groq",
-        "endpoint": "https://api.groq.com/openai/v1",
+        "provider": "deepseek",
+        "endpoint": "https://api.deepseek.com",
         "openai_sdk_version": package_version("openai"),
         "config_path": config_path.relative_to(ROOT).as_posix(),
         "document_split_manifest_sha256": document_split.manifest_sha256,
@@ -192,12 +194,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.source_limit is not None:
         write_json_atomic(
-            output_dir / "pilot_benchmark_v1.json",
+            output_dir / "pilot_benchmark_v2.json",
             benchmark.to_manifest(),
             allow_replace=True,
         )
         write_json_atomic(
-            output_dir / "pilot_run_summary_v1.json",
+            output_dir / "pilot_run_summary_v2.json",
             runtime,
             allow_replace=True,
         )
@@ -209,10 +211,10 @@ def main(argv: list[str] | None = None) -> int:
         document_split=document_split,
         config=config.freeze_config(),
     )
-    write_json_atomic(output_dir / "silver_release_v1.json", frozen.to_manifest())
+    write_json_atomic(output_dir / "silver_release_v2.json", frozen.to_manifest())
     runtime["release_manifest_sha256"] = frozen.manifest_sha256
     runtime["freeze_report"] = asdict(frozen.report)
-    write_json_atomic(output_dir / "formal_run_summary_v1.json", runtime)
+    write_json_atomic(output_dir / "formal_run_summary_v2.json", runtime)
     print(
         f"Formal Silver release complete: {len(benchmark.cases)} cases, "
         f"sha256={frozen.manifest_sha256}"
@@ -269,7 +271,7 @@ def _windowed_annotation_pass(
                 max_chars=window_char_limit,
                 stratum=request.stratum,
             )
-            annotation_pass = GroqAnnotationPass(
+            annotation_pass = AnnotationPass(
                 client=client,
                 config=pass_config,
                 prompt_text=prompt_text,
@@ -302,7 +304,7 @@ def _windowed_adjudication_pass(
     window_char_limit,
     fallback_windows,
 ):
-    adjudicator = GroqAdjudicationPass(
+    adjudicator = AdjudicationPass(
         client=client,
         config=pass_config,
         prompt_text=prompt_text,

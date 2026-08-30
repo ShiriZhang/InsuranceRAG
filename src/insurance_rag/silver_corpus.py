@@ -6,7 +6,7 @@ from pathlib import Path
 import unicodedata
 
 from insurance_rag.config import AppConfig
-from insurance_rag.groq_silver_annotation import EvidenceCaseRequest
+from insurance_rag.silver_annotation import EvidenceCaseRequest
 from insurance_rag.models import DocumentPage
 from insurance_rag.silver_benchmark import (
     BenchmarkSource,

@@ -7,16 +7,16 @@ from uuid import uuid4
 
 import pytest
 
-import insurance_rag.groq_silver_annotation as groq_module
+import insurance_rag.silver_annotation as annotation_module
 from insurance_rag.models import DocumentPage
-from insurance_rag.groq_silver_annotation import (
+from insurance_rag.silver_annotation import (
+    AdjudicationPass,
+    AnnotationCompletion,
+    AnnotationPass,
+    AnnotationPassConfig,
     EvidenceCaseRequest,
-    GroqAdjudicationPass,
-    GroqAnnotationPass,
-    GroqCompletion,
-    GroqPassConfig,
     JsonAnnotationCheckpointStore,
-    OpenAIGroqChatClient,
+    OpenAIDeepSeekResponsesClient,
 )
 from insurance_rag.silver_benchmark import (
     AnnotationDraft,
@@ -29,8 +29,8 @@ from insurance_rag.silver_benchmark import (
 ROOT = Path(__file__).parents[1]
 
 
-class FakeGroqClient:
-    def __init__(self, completion: GroqCompletion) -> None:
+class FakeAnnotationClient:
+    def __init__(self, completion: AnnotationCompletion) -> None:
         self.completion = completion
         self.requests: list[dict[str, object]] = []
 
@@ -57,7 +57,7 @@ def _source() -> BenchmarkSource:
     )
 
 
-def test_groq_annotation_maps_unique_normalized_quote_back_to_raw_span():
+def test_annotation_maps_unique_normalized_quote_back_to_raw_span():
     payload = {
         "cases": [
             {
@@ -71,8 +71,8 @@ def test_groq_annotation_maps_unique_normalized_quote_back_to_raw_span():
             }
         ]
     }
-    client = FakeGroqClient(
-        GroqCompletion(
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
             response_id="response-1",
             system_fingerprint="fingerprint-1",
             content=json.dumps(payload, ensure_ascii=False),
@@ -80,18 +80,15 @@ def test_groq_annotation_maps_unique_normalized_quote_back_to_raw_span():
             completion_tokens=20,
         )
     )
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="annotator-a",
             model_id="openai/gpt-oss-120b",
             prompt_version="silver-evidence-annotator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
-            reasoning_effort="medium",
-            temperature=0,
-            top_p=1,
-            seed=16001,
-            max_completion_tokens=8192,
+            reasoning_effort="low",
+            max_output_tokens=8192,
         ),
         prompt_text="Return exact normalized evidence for every requested slot.",
         case_requests=lambda _source: (
@@ -111,16 +108,19 @@ def test_groq_annotation_maps_unique_normalized_quote_back_to_raw_span():
     assert drafts[0].response_metadata.response_id == "response-1"
     assert drafts[0].response_metadata.system_fingerprint == "fingerprint-1"
     request = client.requests[0]
-    assert "责任 本合同负责。" in request["messages"][1]["content"]
-    assert "责任  本合同负责。" not in request["messages"][1]["content"]
-    assert request["response_format"]["json_schema"]["strict"] is True
+    assert "责任 本合同负责。" in request["input"][1]["content"]
+    assert "责任  本合同负责。" not in request["input"][1]["content"]
+    assert request["text"]["format"]["strict"] is True
+    assert request["reasoning"] == {"effort": "low"}
+    assert "temperature" not in request
+    assert "seed" not in request
     generation_parameters = dict(drafts[0].metadata.generation_parameters)
     assert len(generation_parameters["schema_sha256"]) == 64
 
 
-def test_groq_annotation_rejects_source_over_frozen_input_limit_before_api():
-    client = FakeGroqClient(
-        GroqCompletion(
+def test_annotation_rejects_source_over_frozen_input_limit_before_api():
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
             response_id="unused",
             system_fingerprint=None,
             content='{"cases": []}',
@@ -128,18 +128,15 @@ def test_groq_annotation_rejects_source_over_frozen_input_limit_before_api():
             completion_tokens=0,
         )
     )
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="annotator-a",
             model_id="openai/gpt-oss-120b",
             prompt_version="silver-evidence-annotator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
-            reasoning_effort="medium",
-            temperature=0,
-            top_p=1,
-            seed=16001,
-            max_completion_tokens=8192,
+            reasoning_effort="low",
+            max_output_tokens=8192,
         ),
         prompt_text="Return exact evidence.",
         case_requests=lambda _source: (
@@ -154,7 +151,7 @@ def test_groq_annotation_rejects_source_over_frozen_input_limit_before_api():
     assert client.requests == []
 
 
-def test_groq_annotation_does_not_retry_non_transient_bad_request():
+def test_annotation_does_not_retry_non_transient_bad_request():
     class BadRequestClient:
         def __init__(self):
             self.calls = 0
@@ -166,18 +163,15 @@ def test_groq_annotation_does_not_retry_non_transient_bad_request():
             raise error
 
     client = BadRequestClient()
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="annotator-a",
             model_id="openai/gpt-oss-120b",
             prompt_version="silver-evidence-annotator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
-            reasoning_effort="medium",
-            temperature=0,
-            top_p=1,
-            seed=16001,
-            max_completion_tokens=4096,
+            reasoning_effort="low",
+            max_output_tokens=4096,
         ),
         prompt_text="Return exact evidence.",
         case_requests=lambda _source: (
@@ -191,7 +185,7 @@ def test_groq_annotation_does_not_retry_non_transient_bad_request():
     assert client.calls == 1
 
 
-def test_groq_annotation_waits_for_retry_after_on_429(monkeypatch):
+def test_annotation_waits_for_retry_after_on_429(monkeypatch):
     payload = {
         "cases": [
             {
@@ -217,7 +211,7 @@ def test_groq_annotation_waits_for_retry_after_on_429(monkeypatch):
                 error.status_code = 429
                 error.response = SimpleNamespace(headers={"retry-after": "2.5"})
                 raise error
-            return GroqCompletion(
+            return AnnotationCompletion(
                 response_id="retried",
                 system_fingerprint=None,
                 content=json.dumps(payload, ensure_ascii=False),
@@ -226,21 +220,18 @@ def test_groq_annotation_waits_for_retry_after_on_429(monkeypatch):
             )
 
     sleeps = []
-    monkeypatch.setattr(groq_module.time, "sleep", sleeps.append)
-    monkeypatch.setattr(groq_module.random, "uniform", lambda _start, _end: 0.25)
+    monkeypatch.setattr(annotation_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(annotation_module.random, "uniform", lambda _start, _end: 0.25)
     client = RateLimitedClient()
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="annotator-a",
             model_id="openai/gpt-oss-120b",
             prompt_version="silver-evidence-annotator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
-            reasoning_effort="medium",
-            temperature=0,
-            top_p=1,
-            seed=16001,
-            max_completion_tokens=4096,
+            reasoning_effort="low",
+            max_output_tokens=4096,
         ),
         prompt_text="Return exact evidence.",
         case_requests=lambda _source: (
@@ -268,8 +259,8 @@ def test_second_annotation_uses_frozen_question_from_request():
             }
         ]
     }
-    client = FakeGroqClient(
-        GroqCompletion(
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
             response_id="response-fixed-question",
             system_fingerprint="fingerprint",
             content=json.dumps(payload, ensure_ascii=False),
@@ -278,18 +269,15 @@ def test_second_annotation_uses_frozen_question_from_request():
         )
     )
     frozen_question = "本合同承担什么责任？"
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="annotator-b",
             model_id="openai/gpt-oss-20b",
             prompt_version="silver-evidence-annotator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
-            reasoning_effort="medium",
-            temperature=0,
-            top_p=1,
-            seed=16002,
-            max_completion_tokens=4096,
+            reasoning_effort="none",
+            max_output_tokens=4096,
         ),
         prompt_text="Use a supplied question exactly.",
         case_requests=lambda _source: (
@@ -302,7 +290,7 @@ def test_second_annotation_uses_frozen_question_from_request():
     draft = annotation_pass(_source())[0]
 
     assert draft.question == frozen_question
-    request_text = client.requests[0]["messages"][1]["content"]
+    request_text = client.requests[0]["input"][1]["content"]
     assert frozen_question in request_text
 
 
@@ -320,8 +308,8 @@ def test_cross_page_case_is_uncertain_when_evidence_uses_only_one_page():
             }
         ]
     }
-    client = FakeGroqClient(
-        GroqCompletion(
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
             response_id="response-cross-page",
             system_fingerprint="fingerprint",
             content=json.dumps(payload, ensure_ascii=False),
@@ -329,18 +317,15 @@ def test_cross_page_case_is_uncertain_when_evidence_uses_only_one_page():
             completion_tokens=20,
         )
     )
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="annotator-a",
             model_id="openai/gpt-oss-120b",
             prompt_version="silver-evidence-annotator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
-            reasoning_effort="medium",
-            temperature=0,
-            top_p=1,
-            seed=16001,
-            max_completion_tokens=4096,
+            reasoning_effort="low",
+            max_output_tokens=4096,
         ),
         prompt_text="Return cross-page evidence.",
         case_requests=lambda _source: (
@@ -354,7 +339,7 @@ def test_cross_page_case_is_uncertain_when_evidence_uses_only_one_page():
     assert draft.evidence_spans == ()
 
 
-def test_groq_annotation_reuses_matching_local_checkpoint():
+def test_annotation_reuses_matching_local_checkpoint():
     payload = {
         "cases": [
             {
@@ -368,8 +353,8 @@ def test_groq_annotation_reuses_matching_local_checkpoint():
             }
         ]
     }
-    client = FakeGroqClient(
-        GroqCompletion(
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
             response_id="checkpointed-response",
             system_fingerprint="fingerprint-1",
             content=json.dumps(payload, ensure_ascii=False),
@@ -378,20 +363,17 @@ def test_groq_annotation_reuses_matching_local_checkpoint():
         )
     )
     checkpoint_store = JsonAnnotationCheckpointStore(
-        ROOT / "tmp" / "groq-checkpoint-tests" / uuid4().hex
+        ROOT / "tmp" / "annotation-checkpoint-tests" / uuid4().hex
     )
-    config = GroqPassConfig(
+    config = AnnotationPassConfig(
         annotator_id="annotator-a",
         model_id="openai/gpt-oss-120b",
         prompt_version="silver-evidence-annotator/v1.0.0",
         schema_version="silver-evidence-schema/v1.0.0",
-        reasoning_effort="medium",
-        temperature=0,
-        top_p=1,
-        seed=16001,
-        max_completion_tokens=8192,
+        reasoning_effort="low",
+        max_output_tokens=8192,
     )
-    annotation_pass = GroqAnnotationPass(
+    annotation_pass = AnnotationPass(
         client=client,
         config=config,
         prompt_text="Return exact normalized evidence.",
@@ -409,46 +391,80 @@ def test_groq_annotation_reuses_matching_local_checkpoint():
     assert len(client.requests) == 1
 
 
-def test_openai_compatible_client_moves_groq_options_into_extra_body():
+def test_openai_compatible_client_calls_deepseek_responses_api():
     requests: list[dict[str, object]] = []
 
     class FakeCompletions:
         def create(self, **request):
             requests.append(request)
             return SimpleNamespace(
-                id="groq-response",
-                system_fingerprint="groq-fingerprint",
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content='{"cases": []}')
-                    )
-                ],
-                usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3),
+                id="deepseek-response",
+                system_fingerprint="deepseek-fingerprint",
+                model="deepseek-v4-flash-0731",
+                status="completed",
+                incomplete_details=None,
+                output_text='{"cases": []}',
+                usage=SimpleNamespace(input_tokens=12, output_tokens=3),
             )
 
-    sdk_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions())
-    )
-    client = OpenAIGroqChatClient(sdk_client)
+    sdk_client = SimpleNamespace(responses=FakeCompletions())
+    client = OpenAIDeepSeekResponsesClient(sdk_client)
 
     completion = client.create_completion(
-        model="openai/gpt-oss-120b",
-        messages=[{"role": "user", "content": "fixture"}],
-        reasoning_format="hidden",
-        service_tier="on_demand",
-        temperature=0,
+        model="deepseek-v4-flash",
+        input=[{"role": "user", "content": "fixture"}],
+        reasoning={"effort": "low"},
     )
 
-    assert completion.response_id == "groq-response"
+    assert completion.response_id == "deepseek-response"
     assert completion.prompt_tokens == 12
-    assert requests[0]["extra_body"] == {
-        "reasoning_format": "hidden",
-        "service_tier": "on_demand",
-    }
-    assert "reasoning_format" not in requests[0]
+    assert completion.returned_model == "deepseek-v4-flash-0731"
+    assert completion.response_status == "completed"
+    assert requests[0]["reasoning"] == {"effort": "low"}
+    assert "extra_body" not in requests[0]
 
 
-def test_groq_adjudicator_uses_anonymous_drafts_and_returns_mapped_span():
+def test_annotation_retries_empty_model_output_without_checkpointing(monkeypatch):
+    monkeypatch.setattr(annotation_module.time, "sleep", lambda _seconds: None)
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
+            response_id="incomplete-response",
+            system_fingerprint=None,
+            content="",
+            prompt_tokens=100,
+            completion_tokens=4096,
+            returned_model="deepseek-v4-flash-0731",
+            response_status="incomplete",
+            incomplete_reason="max_output_tokens",
+        )
+    )
+    checkpoint_root = ROOT / "tmp" / "annotation-checkpoint-tests" / uuid4().hex
+    checkpoint_store = JsonAnnotationCheckpointStore(checkpoint_root)
+    annotation_pass = AnnotationPass(
+        client=client,
+        config=AnnotationPassConfig(
+            annotator_id="adjudicator-c",
+            model_id="deepseek-v4-flash",
+            prompt_version="silver-evidence-adjudicator/v1.0.0",
+            schema_version="silver-evidence-schema/v1.0.0",
+            reasoning_effort="high",
+            max_output_tokens=4096,
+        ),
+        prompt_text="Return exact evidence.",
+        case_requests=lambda _source: (
+            EvidenceCaseRequest("slot-1", "single_sentence"),
+        ),
+        checkpoint_store=checkpoint_store,
+    )
+
+    with pytest.raises(ValueError, match="empty JSON.*max_output_tokens"):
+        annotation_pass(_source())
+
+    assert len(client.requests) == 3
+    assert list(checkpoint_root.rglob("*.json")) == []
+
+
+def test_adjudicator_uses_anonymous_drafts_and_returns_mapped_span():
     payload = {
         "cases": [
             {
@@ -462,8 +478,8 @@ def test_groq_adjudicator_uses_anonymous_drafts_and_returns_mapped_span():
             }
         ]
     }
-    client = FakeGroqClient(
-        GroqCompletion(
+    client = FakeAnnotationClient(
+        AnnotationCompletion(
             response_id="adjudication-response",
             system_fingerprint="adjudication-fingerprint",
             content=json.dumps(payload, ensure_ascii=False),
@@ -491,18 +507,15 @@ def test_groq_adjudicator_uses_anonymous_drafts_and_returns_mapped_span():
         ),
         annotation_uncertain=True,
     )
-    adjudicator = GroqAdjudicationPass(
+    adjudicator = AdjudicationPass(
         client=client,
-        config=GroqPassConfig(
+        config=AnnotationPassConfig(
             annotator_id="adjudicator-c",
-            model_id="openai/gpt-oss-120b",
+            model_id="deepseek-v4-flash",
             prompt_version="silver-evidence-adjudicator/v1.0.0",
             schema_version="silver-evidence-schema/v1.0.0",
             reasoning_effort="high",
-            temperature=0,
-            top_p=1,
-            seed=16003,
-            max_completion_tokens=16384,
+            max_output_tokens=16384,
         ),
         prompt_text="Resolve draft_a and draft_b against normalized source text.",
     )
@@ -516,7 +529,7 @@ def test_groq_adjudicator_uses_anonymous_drafts_and_returns_mapped_span():
         "annotator-a",
         "annotator-b",
     }
-    user_content = client.requests[0]["messages"][1]["content"]
+    user_content = client.requests[0]["input"][1]["content"]
     assert "draft_a" in user_content
     assert "draft_b" in user_content
     assert "model-a" not in user_content

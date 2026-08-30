@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Mapping
 
-from insurance_rag.groq_silver_annotation import GroqPassConfig
+from insurance_rag.silver_annotation import AnnotationPassConfig
 from insurance_rag.silver_benchmark import BenchmarkConfig
 from insurance_rag.silver_dataset import DatasetFreezeConfig
 from insurance_rag.silver_normalization import NORMALIZATION_VERSION
@@ -27,9 +27,9 @@ class SilverGenerationConfig:
     held_out_cases_per_source: int
     annotation_input_char_limit: int
     annotation_window_char_limit: int
-    annotator_a: GroqPassConfig
-    annotator_b: GroqPassConfig
-    adjudicator: GroqPassConfig
+    annotator_a: AnnotationPassConfig
+    annotator_b: AnnotationPassConfig
+    adjudicator: AnnotationPassConfig
     size_grid: tuple[tuple[int, int], ...]
     context_token_budgets: tuple[int, ...]
     primary_context_token_budget: int
@@ -169,7 +169,7 @@ def _pass_config(
     input_char_limit: int,
     transport_window_char_limit: int,
     expected_schema_version: str,
-) -> GroqPassConfig:
+) -> AnnotationPassConfig:
     prompt_version = str(payload["prompt_version"])
     if prompt_version != expected_prompt_version:
         raise ValueError(
@@ -180,16 +180,13 @@ def _pass_config(
         raise ValueError(
             "Pass schema_version does not match the frozen versions section."
         )
-    return GroqPassConfig(
+    return AnnotationPassConfig(
         annotator_id=str(payload["annotator_id"]),
         model_id=str(payload["model_id"]),
         prompt_version=prompt_version,
         schema_version=schema_version,
         reasoning_effort=str(payload["reasoning_effort"]),
-        temperature=float(payload["temperature"]),
-        top_p=float(payload["top_p"]),
-        seed=int(payload["seed"]),
-        max_completion_tokens=int(payload["max_completion_tokens"]),
+        max_output_tokens=int(payload["max_output_tokens"]),
         max_retries=int(payload.get("max_retries", 2)),
         normalization_version=normalization_version,
         input_char_limit=input_char_limit,
