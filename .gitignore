@@ -3,6 +3,8 @@ documents/
 eval_reports/
 .rag_eval_cache
 .rag_eval_cache/
+silver_benchmark_data/
+silver_labels/
 
 __pycache__/
 *.py[cod]

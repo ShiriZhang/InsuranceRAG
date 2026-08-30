@@ -1,0 +1,991 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from enum import Enum
+import hashlib
+import json
+import random
+import time
+from typing import Callable, Mapping, Protocol
+
+from insurance_rag.chunker import chunk_pages
+from insurance_rag.config import AppConfig
+from insurance_rag.document_loader import parse_pdf_bytes
+from insurance_rag.hybrid_retriever import HybridRetriever, HybridSearchResult
+from insurance_rag.models import DocumentChunk, DocumentPage
+from insurance_rag.query_rewriter import rewrite_query
+from insurance_rag.retriever import InMemoryVectorIndex
+from insurance_rag.rule_reranker import rerank_results
+
+
+class SourceApproval(str, Enum):
+    PUBLIC = "approved_public"
+    PROJECT_OWNED = "approved_project_owned"
+    USER_UPLOAD = "user_upload"
+    USER_QUESTION = "user_question"
+    GENERATED_ANSWER = "generated_answer"
+    USER_TRACE = "user_trace"
+
+
+APPROVED_SOURCE_TYPES = frozenset(
+    {SourceApproval.PUBLIC, SourceApproval.PROJECT_OWNED}
+)
+JUDGE_ID = "exact-span-v1"
+QUERY_REWRITE_VERSION = "production-v1"
+RERANKER_VERSION = "rules-v1"
+
+
+class Embedder(Protocol):
+    model_id: str
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class TokenCounter(Protocol):
+    tokenizer_id: str
+
+    def __call__(self, text: str) -> int: ...
+
+
+AnnotationPass = Callable[["BenchmarkSource"], tuple["AnnotationDraft", ...]]
+AdjudicationPass = Callable[
+    ["BenchmarkSource", "AnnotationDraft", "AnnotationDraft"],
+    "AnnotationDraft",
+]
+
+
+@dataclass(frozen=True)
+class BenchmarkSource:
+    source_id: str
+    source_name: str
+    approval: SourceApproval
+    approval_reference: str
+    insurer_family: str
+    product_family: str
+    pages: tuple[DocumentPage, ...]
+    source_content_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class EvidenceSpan:
+    page_number: int
+    start_char: int
+    end_char: int
+    quote: str
+
+
+@dataclass(frozen=True)
+class AnnotationMetadata:
+    annotator_id: str
+    model_id: str
+    prompt_version: str
+    generation_parameters: tuple[tuple[str, object], ...]
+
+
+@dataclass(frozen=True)
+class AnnotationDraft:
+    question: str
+    evidence_spans: tuple[EvidenceSpan, ...]
+    stratum: str
+    hard_negative_category: str | None
+    metadata: AnnotationMetadata
+    hard_negative_spans: tuple[EvidenceSpan, ...] = ()
+    annotation_uncertain: bool = False
+
+
+@dataclass(frozen=True)
+class SilverCase:
+    case_id: str
+    source_id: str
+    question: str
+    evidence_spans: tuple[EvidenceSpan, ...]
+    stratum: str
+    hard_negative_category: str | None
+    hard_negative_spans: tuple[EvidenceSpan, ...]
+    annotation_uncertain: bool
+    initial_disagreement: bool
+    adjudicated: bool
+    annotation_outcome: str
+    annotation_metadata: tuple[AnnotationMetadata, ...]
+
+
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    version: str
+    judge_id: str
+    embedding_model_id: str
+    query_rewrite_version: str
+    reranker_version: str
+    retrieval_depth: int
+    context_token_budget: int
+    tokenizer_id: str
+
+    def __post_init__(self) -> None:
+        identifiers = (
+            self.version,
+            self.judge_id,
+            self.embedding_model_id,
+            self.query_rewrite_version,
+            self.reranker_version,
+            self.tokenizer_id,
+        )
+        if any(not identifier.strip() for identifier in identifiers):
+            raise ValueError("Frozen benchmark identifiers cannot be empty.")
+        if self.retrieval_depth < 5:
+            raise ValueError("retrieval_depth must be at least five for Coverage@5.")
+        if self.context_token_budget <= 0:
+            raise ValueError("context_token_budget must be positive.")
+
+
+@dataclass(frozen=True)
+class FrozenBenchmark:
+    version: str
+    sources: tuple[BenchmarkSource, ...]
+    cases: tuple[SilverCase, ...]
+    config: BenchmarkConfig
+    annotation_runs: tuple[AnnotationMetadata, ...]
+
+    def to_manifest(self) -> dict[str, object]:
+        source_records = []
+        for source in self.sources:
+            source_text = _source_text(source.pages)
+            normalized_text = _normalized_source_text(source.pages)
+            source_records.append(
+                {
+                    "source_id": source.source_id,
+                    "source_name": source.source_name,
+                    "approval": source.approval.value,
+                    "approval_reference": source.approval_reference,
+                    "insurer_family": source.insurer_family,
+                    "product_family": source.product_family,
+                    "source_sha256": source.source_content_sha256
+                    or _sha256(source_text),
+                    "normalized_text_sha256": _sha256(normalized_text),
+                    "pages": [page.page_number for page in source.pages],
+                }
+            )
+        return {
+            "version": self.version,
+            "config": asdict(self.config),
+            "source_records": source_records,
+            "annotation_runs": [
+                {
+                    "annotator_id": run.annotator_id,
+                    "model_id": run.model_id,
+                    "prompt_version": run.prompt_version,
+                    "generation_parameters": dict(run.generation_parameters),
+                }
+                for run in self.annotation_runs
+            ],
+            "cases": [
+                {
+                    "case_id": case.case_id,
+                    "source_id": case.source_id,
+                    "question": case.question,
+                    "evidence_spans": [asdict(span) for span in case.evidence_spans],
+                    "stratum": case.stratum,
+                    "hard_negative_category": case.hard_negative_category,
+                    "hard_negative_spans": [
+                        asdict(span) for span in case.hard_negative_spans
+                    ],
+                    "annotation_uncertain": case.annotation_uncertain,
+                    "initial_disagreement": case.initial_disagreement,
+                    "adjudicated": case.adjudicated,
+                    "annotation_outcome": case.annotation_outcome,
+                }
+                for case in self.cases
+            ],
+        }
+
+    @property
+    def manifest_sha256(self) -> str:
+        payload = json.dumps(
+            self.to_manifest(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return _sha256(payload)
+
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    name: str
+    chunking_strategy: str
+    target_chars: int = 900
+    hard_max_chars: int = 1200
+
+
+@dataclass(frozen=True)
+class AnnotationSummary:
+    total_cases: int
+    initial_disagreements: int
+    adjudicated_cases: int
+    uncertain_exclusions: int
+
+    @property
+    def disagreement_rate(self) -> float:
+        return _rate(self.initial_disagreements, self.total_cases)
+
+    @property
+    def adjudication_success_rate(self) -> float:
+        resolved = self.adjudicated_cases - self.uncertain_exclusions
+        return _rate(resolved, self.adjudicated_cases)
+
+    @property
+    def exclusion_rate(self) -> float:
+        return _rate(self.uncertain_exclusions, self.total_cases)
+
+
+@dataclass(frozen=True)
+class StrategyResult:
+    strategy_name: str
+    scored_cases: int
+    coverage_at: Mapping[int, float]
+    coverage_under_token_budget: float
+    single_candidate_coverage: float
+    irrelevant_context_proportion: float
+    hard_negative_confusions: Mapping[str, int]
+    embedding_tokens: int
+    retrieval_unit_count: int
+    chunking_latency_seconds: float
+    case_coverage_at_3: tuple[float, ...]
+    case_coverage_under_budget: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class ConfidenceInterval:
+    estimate: float
+    lower: float
+    upper: float
+    confidence_level: float = 0.95
+
+
+@dataclass(frozen=True)
+class PairedComparison:
+    baseline_strategy: str
+    candidate_strategy: str
+    coverage_at_3: ConfidenceInterval
+    coverage_under_token_budget: ConfidenceInterval
+
+
+@dataclass(frozen=True)
+class BenchmarkReport:
+    benchmark_version: str
+    manifest_sha256: str
+    annotation_summary: AnnotationSummary
+    strategy_results: tuple[StrategyResult, ...]
+    paired_comparisons: tuple[PairedComparison, ...]
+
+
+def source_from_pdf_bytes(
+    pdf_bytes: bytes,
+    *,
+    source_id: str,
+    source_name: str,
+    approval: SourceApproval,
+    approval_reference: str,
+    insurer_family: str,
+    product_family: str,
+    parse_config: AppConfig,
+) -> BenchmarkSource:
+    source = BenchmarkSource(
+        source_id=source_id,
+        source_name=source_name,
+        approval=approval,
+        approval_reference=approval_reference,
+        insurer_family=insurer_family,
+        product_family=product_family,
+        pages=parse_pdf_bytes(pdf_bytes, source_name, parse_config).pages,
+        source_content_sha256=_sha256_bytes(pdf_bytes),
+    )
+    _validate_approved_source(source)
+    return source
+
+
+def generate_frozen_benchmark(
+    *,
+    sources: tuple[BenchmarkSource, ...],
+    first_pass: AnnotationPass,
+    second_pass: AnnotationPass,
+    adjudication_pass: AdjudicationPass,
+    config: BenchmarkConfig,
+) -> FrozenBenchmark:
+    annotation_pairs: dict[
+        str, tuple[tuple[AnnotationDraft, AnnotationDraft], ...]
+    ] = {}
+    adjudications: dict[tuple[str, int], AnnotationDraft] = {}
+    for source in sources:
+        _validate_approved_source(source)
+        first_annotations = first_pass(source)
+        second_annotations = second_pass(source)
+        if len(first_annotations) != len(second_annotations):
+            raise ValueError(
+                "Independent annotation passes must return the same number of cases."
+            )
+        pairs = tuple(zip(first_annotations, second_annotations))
+        annotation_pairs[source.source_id] = pairs
+        for case_index, (first, second) in enumerate(pairs):
+            if _annotation_label(first) != _annotation_label(second):
+                adjudications[(source.source_id, case_index)] = adjudication_pass(
+                    source, first, second
+                )
+    return build_frozen_benchmark(
+        sources=sources,
+        annotation_pairs=annotation_pairs,
+        adjudications=adjudications,
+        config=config,
+    )
+
+
+def adjudicate_annotations(
+    source: BenchmarkSource,
+    first: AnnotationDraft,
+    second: AnnotationDraft,
+    *,
+    adjudication: AnnotationDraft | None = None,
+) -> SilverCase:
+    _validate_approved_source(source)
+    _validate_annotation(source, first)
+    _validate_annotation(source, second)
+    if first.metadata.annotator_id == second.metadata.annotator_id:
+        raise ValueError("Two independent annotations require different annotator IDs.")
+
+    agreed = _annotation_label(first) == _annotation_label(second)
+    metadata = [first.metadata, second.metadata]
+    if agreed:
+        selected = first
+        outcome = "agreed"
+        adjudicated = False
+    else:
+        if adjudication is None:
+            raise ValueError("Disagreement requires a third independent adjudicator.")
+        if adjudication.metadata.annotator_id in {
+            first.metadata.annotator_id,
+            second.metadata.annotator_id,
+        }:
+            raise ValueError("Disagreement requires a third independent adjudicator.")
+        _validate_annotation(source, adjudication)
+        selected = adjudication
+        metadata.append(adjudication.metadata)
+        outcome = "annotation_uncertain" if adjudication.annotation_uncertain else "adjudicated"
+        adjudicated = True
+
+    if selected.annotation_uncertain and selected.evidence_spans:
+        raise ValueError("annotation_uncertain cases cannot freeze evidence spans.")
+    if not selected.annotation_uncertain and not selected.evidence_spans:
+        raise ValueError("Resolved annotations require exact evidence spans.")
+
+    case_identity = json.dumps(
+        {
+            "source_id": source.source_id,
+            "question": selected.question,
+            "spans": [asdict(span) for span in selected.evidence_spans],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return SilverCase(
+        case_id=f"silver-{_sha256(case_identity)[:16]}",
+        source_id=source.source_id,
+        question=selected.question,
+        evidence_spans=selected.evidence_spans,
+        stratum=selected.stratum,
+        hard_negative_category=selected.hard_negative_category,
+        hard_negative_spans=selected.hard_negative_spans,
+        annotation_uncertain=selected.annotation_uncertain,
+        initial_disagreement=not agreed,
+        adjudicated=adjudicated,
+        annotation_outcome=outcome,
+        annotation_metadata=tuple(metadata),
+    )
+
+
+def build_frozen_benchmark(
+    *,
+    sources: tuple[BenchmarkSource, ...],
+    annotation_pairs: Mapping[
+        str, tuple[tuple[AnnotationDraft, AnnotationDraft], ...]
+    ],
+    adjudications: Mapping[tuple[str, int], AnnotationDraft],
+    config: BenchmarkConfig,
+) -> FrozenBenchmark:
+    source_ids: set[str] = set()
+    cases: list[SilverCase] = []
+    annotation_runs: dict[str, AnnotationMetadata] = {}
+    for source in sources:
+        _validate_approved_source(source)
+        if source.source_id in source_ids:
+            raise ValueError(f"Duplicate benchmark source ID: {source.source_id}")
+        source_ids.add(source.source_id)
+        pairs = annotation_pairs.get(source.source_id, ())
+        for case_index, (first, second) in enumerate(pairs):
+            case = adjudicate_annotations(
+                source,
+                first,
+                second,
+                adjudication=adjudications.get((source.source_id, case_index)),
+            )
+            cases.append(case)
+            for metadata in case.annotation_metadata:
+                existing = annotation_runs.get(metadata.annotator_id)
+                if existing is not None and existing != metadata:
+                    raise ValueError(
+                        f"Annotator metadata changed within one frozen version: {metadata.annotator_id}"
+                    )
+                annotation_runs[metadata.annotator_id] = metadata
+
+    unknown_annotation_sources = set(annotation_pairs) - source_ids
+    if unknown_annotation_sources:
+        raise ValueError(
+            "Annotations reference unknown sources: "
+            + ", ".join(sorted(unknown_annotation_sources))
+        )
+    if not cases:
+        raise ValueError("A frozen benchmark requires at least one annotated case.")
+    return FrozenBenchmark(
+        version=config.version,
+        sources=sources,
+        cases=tuple(cases),
+        config=config,
+        annotation_runs=tuple(
+            annotation_runs[key] for key in sorted(annotation_runs)
+        ),
+    )
+
+
+def run_frozen_benchmark(
+    benchmark: FrozenBenchmark,
+    *,
+    strategies: tuple[StrategyConfig, ...],
+    embedder: Embedder,
+    token_counter: TokenCounter,
+    bootstrap_samples: int = 2000,
+) -> BenchmarkReport:
+    if not strategies:
+        raise ValueError("At least one strategy is required.")
+    if len({strategy.name for strategy in strategies}) != len(strategies):
+        raise ValueError("Strategy names must be unique.")
+    if bootstrap_samples <= 0:
+        raise ValueError("bootstrap_samples must be positive.")
+
+    _validate_execution_config(benchmark, embedder, token_counter)
+    source_by_id = {source.source_id: source for source in benchmark.sources}
+    for source in benchmark.sources:
+        _validate_approved_source(source)
+    for case in benchmark.cases:
+        source = source_by_id.get(case.source_id)
+        if source is None:
+            raise ValueError(
+                f"Silver case references unknown source: {case.source_id}"
+            )
+        _validate_scored_case(source, case)
+
+    scored_cases = tuple(
+        case for case in benchmark.cases if not case.annotation_uncertain
+    )
+    strategy_results = tuple(
+        _run_strategy(
+            benchmark,
+            strategy,
+            scored_cases,
+            source_by_id,
+            embedder,
+            token_counter,
+        )
+        for strategy in strategies
+    )
+    baseline = strategy_results[0]
+    comparisons = tuple(
+        PairedComparison(
+            baseline_strategy=baseline.strategy_name,
+            candidate_strategy=candidate.strategy_name,
+            coverage_at_3=_paired_confidence_interval(
+                baseline.case_coverage_at_3,
+                candidate.case_coverage_at_3,
+                bootstrap_samples=bootstrap_samples,
+            ),
+            coverage_under_token_budget=_paired_confidence_interval(
+                baseline.case_coverage_under_budget,
+                candidate.case_coverage_under_budget,
+                bootstrap_samples=bootstrap_samples,
+            ),
+        )
+        for candidate in strategy_results[1:]
+    )
+    annotation_summary = AnnotationSummary(
+        total_cases=len(benchmark.cases),
+        initial_disagreements=sum(
+            case.initial_disagreement for case in benchmark.cases
+        ),
+        adjudicated_cases=sum(case.adjudicated for case in benchmark.cases),
+        uncertain_exclusions=len(benchmark.cases) - len(scored_cases),
+    )
+    return BenchmarkReport(
+        benchmark_version=benchmark.version,
+        manifest_sha256=benchmark.manifest_sha256,
+        annotation_summary=annotation_summary,
+        strategy_results=strategy_results,
+        paired_comparisons=comparisons,
+    )
+
+
+def render_benchmark_markdown(report: BenchmarkReport) -> str:
+    summary = report.annotation_summary
+    lines = [
+        "# Silver Supporting Evidence Benchmark",
+        "",
+        f"Benchmark version: `{report.benchmark_version}`",
+        f"Frozen manifest SHA-256: `{report.manifest_sha256}`",
+        "",
+        "## Annotation quality",
+        "",
+        f"- Annotation disagreement: {summary.initial_disagreements}/{summary.total_cases} ({summary.disagreement_rate:.2%})",
+        f"- Adjudication success: {summary.adjudicated_cases - summary.uncertain_exclusions}/{summary.adjudicated_cases} ({summary.adjudication_success_rate:.2%})",
+        f"- Uncertain exclusions: {summary.uncertain_exclusions}/{summary.total_cases} ({summary.exclusion_rate:.2%})",
+        "",
+        "## Retrieval, context, and cost",
+        "",
+        "| Strategy | Scored | Coverage@1/@3/@5 | Coverage under token budget | Single-candidate coverage | Irrelevant context | Embedding tokens | Retrieval units | Chunking latency (s) | Hard-negative confusions |",
+        "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for result in report.strategy_results:
+        hard_negatives = ", ".join(
+            f"{category}: {count}"
+            for category, count in sorted(result.hard_negative_confusions.items())
+        ) or "none"
+        lines.append(
+            "| {name} | {scored} | {at1:.2%}/{at3:.2%}/{at5:.2%} | {budget:.2%} | {single:.2%} | {irrelevant:.2%} | {tokens} | {units} | {latency:.6f} | {hard_negatives} |".format(
+                name=result.strategy_name,
+                scored=result.scored_cases,
+                at1=result.coverage_at[1],
+                at3=result.coverage_at[3],
+                at5=result.coverage_at[5],
+                budget=result.coverage_under_token_budget,
+                single=result.single_candidate_coverage,
+                irrelevant=result.irrelevant_context_proportion,
+                tokens=result.embedding_tokens,
+                units=result.retrieval_unit_count,
+                latency=result.chunking_latency_seconds,
+                hard_negatives=hard_negatives,
+            )
+        )
+    lines.extend(("", "## Paired 95% confidence intervals", ""))
+    if not report.paired_comparisons:
+        lines.append("No candidate strategy was supplied.")
+    for comparison in report.paired_comparisons:
+        lines.append(
+            "- {candidate} minus {baseline}: Coverage@3 {coverage}; Coverage under token budget {budget}.".format(
+                candidate=comparison.candidate_strategy,
+                baseline=comparison.baseline_strategy,
+                coverage=_format_interval(comparison.coverage_at_3),
+                budget=_format_interval(comparison.coverage_under_token_budget),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _run_strategy(
+    benchmark: FrozenBenchmark,
+    strategy: StrategyConfig,
+    cases: tuple[SilverCase, ...],
+    source_by_id: Mapping[str, BenchmarkSource],
+    embedder: Embedder,
+    token_counter: TokenCounter,
+) -> StrategyResult:
+    retrievers: dict[str, HybridRetriever] = {}
+    retrieval_unit_count = 0
+    embedding_tokens = 0
+    chunking_latency = 0.0
+    for source in benchmark.sources:
+        started = time.perf_counter()
+        chunks = chunk_pages(
+            source.pages,
+            source_name=source.source_name,
+            source_type="silver_benchmark",
+            chunk_size=strategy.target_chars,
+            overlap=0,
+            strategy=strategy.chunking_strategy,
+            target_chars=strategy.target_chars,
+            hard_max_chars=strategy.hard_max_chars,
+        )
+        chunking_latency += time.perf_counter() - started
+        if not chunks:
+            raise ValueError(
+                f"Strategy {strategy.name!r} produced no retrieval units for {source.source_id!r}."
+            )
+        texts = [chunk.retrieval_text for chunk in chunks]
+        embeddings = embedder.embed_texts(texts)
+        index = InMemoryVectorIndex.from_embeddings(chunks, embeddings)
+        retrievers[source.source_id] = HybridRetriever(
+            chunks,
+            index,
+            embedder,
+            retrieval_mode="hybrid",
+        )
+        retrieval_unit_count += len(chunks)
+        embedding_tokens += sum(token_counter(text) for text in texts)
+
+    coverage_by_k: dict[int, list[float]] = {1: [], 3: [], 5: []}
+    coverage_under_budget: list[float] = []
+    single_candidate: list[float] = []
+    irrelevant_chars = 0
+    retrieved_chars = 0
+    hard_negative_confusions: dict[str, int] = {}
+    for case in cases:
+        source = source_by_id[case.source_id]
+        rewrite = rewrite_query(case.question)
+        embedding_tokens += sum(
+            token_counter(query) for query in rewrite.expanded_queries
+        )
+        initial = retrievers[case.source_id].search(
+            rewrite,
+            top_k=benchmark.config.retrieval_depth,
+        )
+        retrieved = tuple(
+            rerank_results(
+                question=case.question,
+                rewrite=rewrite,
+                candidates=initial,
+                top_k=benchmark.config.retrieval_depth,
+            )
+        )
+        for top_k in (1, 3, 5):
+            coverage_by_k[top_k].append(
+                float(
+                    _covers_all_spans(
+                        retrieved[:top_k], case.evidence_spans, source
+                    )
+                )
+            )
+        budgeted = _within_token_budget(
+            retrieved,
+            benchmark.config.context_token_budget,
+            token_counter,
+        )
+        coverage_under_budget.append(
+            float(_covers_all_spans(budgeted, case.evidence_spans, source))
+        )
+        single_candidate.append(
+            float(
+                any(
+                    _covers_all_spans((item,), case.evidence_spans, source)
+                    for item in retrieved
+                )
+            )
+        )
+        case_irrelevant, case_retrieved = _irrelevant_context_chars(
+            source,
+            retrieved,
+            case.evidence_spans,
+        )
+        irrelevant_chars += case_irrelevant
+        retrieved_chars += case_retrieved
+        if case.hard_negative_category:
+            hard_negative_confusions.setdefault(case.hard_negative_category, 0)
+            if _covers_any_span(
+                retrieved[:1], case.hard_negative_spans, source
+            ):
+                hard_negative_confusions[case.hard_negative_category] += 1
+
+    return StrategyResult(
+        strategy_name=strategy.name,
+        scored_cases=len(cases),
+        coverage_at={
+            top_k: _mean(values) for top_k, values in coverage_by_k.items()
+        },
+        coverage_under_token_budget=_mean(coverage_under_budget),
+        single_candidate_coverage=_mean(single_candidate),
+        irrelevant_context_proportion=_rate(irrelevant_chars, retrieved_chars),
+        hard_negative_confusions=hard_negative_confusions,
+        embedding_tokens=embedding_tokens,
+        retrieval_unit_count=retrieval_unit_count,
+        chunking_latency_seconds=chunking_latency,
+        case_coverage_at_3=tuple(coverage_by_k[3]),
+        case_coverage_under_budget=tuple(coverage_under_budget),
+    )
+
+
+def _validate_approved_source(source: BenchmarkSource) -> None:
+    if source.approval not in APPROVED_SOURCE_TYPES:
+        raise ValueError(
+            "Benchmark annotation sources must be approved public or project-owned text."
+        )
+    if not source.approval_reference.strip():
+        raise ValueError("Approved sources require an approval_reference.")
+    if not source.pages:
+        raise ValueError("Benchmark sources require page-addressable text.")
+    page_numbers = [page.page_number for page in source.pages]
+    if len(set(page_numbers)) != len(page_numbers):
+        raise ValueError("Benchmark source page numbers must be unique.")
+
+
+def _validate_execution_config(
+    benchmark: FrozenBenchmark,
+    embedder: Embedder,
+    token_counter: TokenCounter,
+) -> None:
+    config = benchmark.config
+    embedding_model_id = getattr(
+        embedder, "model_id", getattr(embedder, "model", None)
+    )
+    tokenizer_id = getattr(token_counter, "tokenizer_id", None)
+    actual = {
+        "judge_id": JUDGE_ID,
+        "embedding_model_id": embedding_model_id,
+        "query_rewrite_version": QUERY_REWRITE_VERSION,
+        "reranker_version": RERANKER_VERSION,
+        "tokenizer_id": tokenizer_id,
+    }
+    expected = {
+        "judge_id": config.judge_id,
+        "embedding_model_id": config.embedding_model_id,
+        "query_rewrite_version": config.query_rewrite_version,
+        "reranker_version": config.reranker_version,
+        "tokenizer_id": config.tokenizer_id,
+    }
+    if actual != expected:
+        differences = ", ".join(
+            f"{key}: expected {expected[key]!r}, got {actual[key]!r}"
+            for key in expected
+            if expected[key] != actual[key]
+        )
+        raise ValueError(
+            "Execution components do not match the frozen retrieval configuration: "
+            + differences
+        )
+
+
+def _validate_scored_case(source: BenchmarkSource, case: SilverCase) -> None:
+    pages = {page.page_number: page.text for page in source.pages}
+    for span in case.evidence_spans:
+        _validate_span(pages, span)
+    for span in case.hard_negative_spans:
+        _validate_span(pages, span)
+    if case.annotation_uncertain and case.evidence_spans:
+        raise ValueError("annotation_uncertain cases cannot freeze evidence spans.")
+    if not case.annotation_uncertain and not case.evidence_spans:
+        raise ValueError("Every scored Silver case requires exact evidence spans.")
+    if bool(case.hard_negative_category) != bool(case.hard_negative_spans):
+        raise ValueError(
+            "Hard-negative categories require exact hard-negative spans and vice versa."
+        )
+
+
+def _validate_span(
+    pages: Mapping[int, str],
+    span: EvidenceSpan,
+) -> None:
+    page_text = pages.get(span.page_number)
+    if (
+        page_text is None
+        or span.start_char < 0
+        or span.end_char <= span.start_char
+        or span.end_char > len(page_text)
+        or page_text[span.start_char : span.end_char] != span.quote
+    ):
+        raise ValueError(
+            "Silver evidence span does not exactly map to authoritative source text."
+        )
+
+
+def _validate_annotation(source: BenchmarkSource, annotation: AnnotationDraft) -> None:
+    if not annotation.question.strip():
+        raise ValueError("Annotations require a question.")
+    if not annotation.metadata.model_id.strip():
+        raise ValueError("Annotations require an exact model identifier.")
+    if not annotation.metadata.prompt_version.strip():
+        raise ValueError("Annotations require a prompt version.")
+    pages = {page.page_number: page.text for page in source.pages}
+    for span in annotation.evidence_spans:
+        _validate_span(pages, span)
+    for span in annotation.hard_negative_spans:
+        _validate_span(pages, span)
+    if bool(annotation.hard_negative_category) != bool(
+        annotation.hard_negative_spans
+    ):
+        raise ValueError(
+            "Hard-negative categories require exact hard-negative spans and vice versa."
+        )
+
+
+def _annotation_label(annotation: AnnotationDraft) -> tuple[object, ...]:
+    return (
+        annotation.question,
+        annotation.evidence_spans,
+        annotation.stratum,
+        annotation.hard_negative_category,
+        annotation.hard_negative_spans,
+        annotation.annotation_uncertain,
+    )
+
+
+def _covers_all_spans(
+    retrieved: tuple[HybridSearchResult, ...],
+    evidence_spans: tuple[EvidenceSpan, ...],
+    source: BenchmarkSource,
+) -> bool:
+    return all(
+        any(
+            source_span.page_number == evidence.page_number
+            and source_span.start_char <= evidence.start_char
+            and source_span.end_char >= evidence.end_char
+            for item in retrieved
+            for source_span in _authoritative_chunk_ranges(item.chunk, source)
+        )
+        for evidence in evidence_spans
+    )
+
+
+def _covers_any_span(
+    retrieved: tuple[HybridSearchResult, ...],
+    spans: tuple[EvidenceSpan, ...],
+    source: BenchmarkSource,
+) -> bool:
+    return any(
+        source_span.page_number == expected.page_number
+        and source_span.start_char <= expected.start_char
+        and source_span.end_char >= expected.end_char
+        for item in retrieved
+        for source_span in _authoritative_chunk_ranges(item.chunk, source)
+        for expected in spans
+    )
+
+
+def _within_token_budget(
+    retrieved: tuple[HybridSearchResult, ...],
+    token_budget: int,
+    token_counter: TokenCounter,
+) -> tuple[HybridSearchResult, ...]:
+    selected: list[HybridSearchResult] = []
+    used = 0
+    for item in retrieved:
+        item_tokens = token_counter(item.chunk.retrieval_text)
+        if used + item_tokens > token_budget:
+            continue
+        selected.append(item)
+        used += item_tokens
+    return tuple(selected)
+
+
+def _irrelevant_context_chars(
+    source: BenchmarkSource,
+    retrieved: tuple[HybridSearchResult, ...],
+    evidence_spans: tuple[EvidenceSpan, ...],
+) -> tuple[int, int]:
+    total = 0
+    relevant = 0
+    for item in retrieved:
+        for source_span in _authoritative_chunk_ranges(item.chunk, source):
+            span_length = source_span.end_char - source_span.start_char
+            total += span_length
+            for evidence in evidence_spans:
+                if evidence.page_number != source_span.page_number:
+                    continue
+                relevant += max(
+                    0,
+                    min(source_span.end_char, evidence.end_char)
+                    - max(source_span.start_char, evidence.start_char),
+                )
+    return max(0, total - relevant), total
+
+
+def _authoritative_chunk_ranges(
+    chunk: DocumentChunk,
+    source: BenchmarkSource,
+) -> tuple[EvidenceSpan, ...]:
+    if chunk.source_spans:
+        return tuple(
+            EvidenceSpan(
+                page_number=span.page_number,
+                start_char=span.start_char,
+                end_char=span.end_char,
+                quote=span.text,
+            )
+            for span in chunk.source_spans
+        )
+    if chunk.page_number is None:
+        return ()
+    page = next(
+        (page for page in source.pages if page.page_number == chunk.page_number),
+        None,
+    )
+    if page is None:
+        return ()
+    start_char = page.text.find(chunk.text)
+    if start_char < 0:
+        return ()
+    return (
+        EvidenceSpan(
+            page_number=page.page_number,
+            start_char=start_char,
+            end_char=start_char + len(chunk.text),
+            quote=chunk.text,
+        ),
+    )
+
+
+def _paired_confidence_interval(
+    baseline: tuple[float, ...],
+    candidate: tuple[float, ...],
+    *,
+    bootstrap_samples: int,
+) -> ConfidenceInterval:
+    if len(baseline) != len(candidate):
+        raise ValueError("Paired comparisons require the same frozen cases.")
+    differences = [right - left for left, right in zip(baseline, candidate)]
+    estimate = _mean(differences)
+    if not differences:
+        return ConfidenceInterval(estimate=0.0, lower=0.0, upper=0.0)
+    generator = random.Random(0)
+    bootstrapped = sorted(
+        _mean([generator.choice(differences) for _ in differences])
+        for _ in range(bootstrap_samples)
+    )
+    lower_index = int(0.025 * (bootstrap_samples - 1))
+    upper_index = int(0.975 * (bootstrap_samples - 1))
+    return ConfidenceInterval(
+        estimate=estimate,
+        lower=bootstrapped[lower_index],
+        upper=bootstrapped[upper_index],
+    )
+
+
+def _source_text(pages: tuple[DocumentPage, ...]) -> str:
+    return "\n\f\n".join(
+        f"page:{page.page_number}\n{page.text}" for page in pages
+    )
+
+
+def _normalized_source_text(pages: tuple[DocumentPage, ...]) -> str:
+    return "\n\f\n".join(
+        f"page:{page.page_number}\n{' '.join(page.text.split())}" for page in pages
+    )
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def _format_interval(interval: ConfidenceInterval) -> str:
+    return (
+        f"{interval.estimate:+.2%} "
+        f"[{interval.lower:+.2%}, {interval.upper:+.2%}]"
+    )
