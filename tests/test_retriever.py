@@ -1,6 +1,7 @@
 import pytest
 
-from insurance_rag.models import DocumentChunk
+from insurance_rag.chunker import chunk_pages
+from insurance_rag.models import DocumentChunk, DocumentPage
 from insurance_rag.retriever import InMemoryVectorIndex, build_index
 
 
@@ -76,3 +77,27 @@ def test_build_index_rejects_empty_chunks_without_calling_embedder():
         build_index((), embedder)
 
     assert embedder.calls == []
+
+
+def test_build_index_embeds_retrieval_context_with_authoritative_source_text():
+    class FakeEmbedder:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            return [[1.0, 0.0]]
+
+    chunk = chunk_pages(
+        (DocumentPage(1, "第六条 等待期\n等待期为九十日。", "text"),),
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )[0]
+    embedder = FakeEmbedder()
+
+    build_index((chunk,), embedder)
+
+    assert embedder.calls == [[chunk.retrieval_text]]

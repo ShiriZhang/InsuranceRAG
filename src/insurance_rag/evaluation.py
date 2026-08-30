@@ -168,7 +168,7 @@ def evaluate_synthetic_cases(
     for index, case in enumerate(cases, start=1):
         _validate_case(case, index)
         chunks = _chunks_for_case(case)
-        embeddings = embedder.embed_texts([chunk.text for chunk in chunks])
+        embeddings = embedder.embed_texts([chunk.retrieval_text for chunk in chunks])
         vector_index = InMemoryVectorIndex.from_embeddings(chunks, embeddings)
         retriever = HybridRetriever(
             chunks,
@@ -223,7 +223,7 @@ def evaluate_hard_negative_cases(path: Path, top_k: int = 3) -> HardNegativeEval
     for index, case in enumerate(raw_cases, start=1):
         _validate_hard_negative_case(case, index)
         chunks = _hard_negative_chunks_for_case(case)
-        embeddings = embedder.embed_texts([chunk.text for chunk in chunks])
+        embeddings = embedder.embed_texts([chunk.retrieval_text for chunk in chunks])
         vector_index = InMemoryVectorIndex.from_embeddings(chunks, embeddings)
         retriever = HybridRetriever(
             chunks,
@@ -425,6 +425,7 @@ def _evaluate_local_documents(
                 source_type="local_eval",
                 chunk_size=eval_config.chunk_size,
                 overlap=eval_config.chunk_overlap,
+                strategy=eval_config.chunking_strategy,
             )
         except Exception as exc:
             parse_errors.append(f"{pdf.name}: {type(exc).__name__}: {exc}")
@@ -659,9 +660,9 @@ def build_eval_citation(chunk: DocumentChunk) -> Citation:
     return Citation(
         source_type=chunk.source_type,
         source_name=chunk.source_name,
-        page_number=chunk.page_number,
+        page_number=chunk.authoritative_page_number,
         section_title=chunk.section_title,
-        excerpt=chunk.text,
+        excerpt=chunk.authoritative_text,
     )
 
 

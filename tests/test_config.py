@@ -1,3 +1,5 @@
+import pytest
+
 from insurance_rag.config import AppConfig
 
 
@@ -7,6 +9,7 @@ CONFIG_ENV_VARS = (
     "INSURANCE_RAG_EMBEDDING_MODEL",
     "INSURANCE_RAG_CHUNK_SIZE",
     "INSURANCE_RAG_CHUNK_OVERLAP",
+    "INSURANCE_RAG_CHUNKING_STRATEGY",
     "INSURANCE_RAG_POLICY_TOP_K",
     "INSURANCE_RAG_BUILTIN_TOP_K",
     "INSURANCE_RAG_MIN_PAGE_TEXT_CHARS",
@@ -73,6 +76,20 @@ def test_config_reads_environment(monkeypatch):
     assert config.min_page_text_chars == 100
     assert config.max_garbled_ratio == 0.5
     assert config.ocr_enabled is False
+
+
+def test_config_selects_clause_v2_chunking_strategy(monkeypatch):
+    clear_config_env(monkeypatch)
+    monkeypatch.setenv("INSURANCE_RAG_CHUNKING_STRATEGY", "clause_v2")
+
+    config = AppConfig.from_env()
+
+    assert config.chunking_strategy == "clause_v2"
+
+
+def test_config_rejects_unknown_chunking_strategy():
+    with pytest.raises(ValueError, match="Unsupported chunking strategy"):
+        AppConfig(openai_api_key=None, chunking_strategy="typo")
 
 
 def test_retrieval_quality_config_defaults(monkeypatch):

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import os
 
+from insurance_rag.models import CHUNKING_STRATEGIES
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -16,6 +18,7 @@ class AppConfig:
     embedding_model: str = "text-embedding-3-small"
     chunk_size: int = 900
     chunk_overlap: int = 150
+    chunking_strategy: str = "legacy"
     policy_top_k: int = 6
     builtin_top_k: int = 3
     min_page_text_chars: int = 80
@@ -33,6 +36,12 @@ class AppConfig:
     heading_confidence_warn_threshold: float = 0.35
     hard_negative_local_limit: int = 20
 
+    def __post_init__(self) -> None:
+        if self.chunking_strategy not in CHUNKING_STRATEGIES:
+            raise ValueError(
+                f"Unsupported chunking strategy: {self.chunking_strategy!r}"
+            )
+
     @classmethod
     def from_env(cls) -> "AppConfig":
         return cls(
@@ -44,6 +53,7 @@ class AppConfig:
             ),
             chunk_size=int(os.getenv("INSURANCE_RAG_CHUNK_SIZE", "900")),
             chunk_overlap=int(os.getenv("INSURANCE_RAG_CHUNK_OVERLAP", "150")),
+            chunking_strategy=os.getenv("INSURANCE_RAG_CHUNKING_STRATEGY", "legacy"),
             policy_top_k=int(os.getenv("INSURANCE_RAG_POLICY_TOP_K", "6")),
             builtin_top_k=int(os.getenv("INSURANCE_RAG_BUILTIN_TOP_K", "3")),
             min_page_text_chars=int(os.getenv("INSURANCE_RAG_MIN_PAGE_TEXT_CHARS", "80")),

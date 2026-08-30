@@ -99,7 +99,7 @@ def _rerank_candidate(
 ) -> HybridSearchResult:
     chunk = candidate.chunk
     title = chunk.section_title or ""
-    text = chunk.text or ""
+    text = chunk.retrieval_text or ""
     combined_text = f"{title}\n{text}"
 
     score = 0.0
