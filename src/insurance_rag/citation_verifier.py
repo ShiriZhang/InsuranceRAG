@@ -449,7 +449,9 @@ def _find_supporting_policy_text_citation(
 ) -> Citation | None:
     normalized_fact = _normalize_claim_text(fact_text)
     for citation in policy_citations:
-        citation_text = _normalize_claim_text(citation.section_title + citation.excerpt)
+        citation_text = _normalize_claim_text(
+            citation.section_title + citation.authoritative_text
+        )
         if normalized_fact in citation_text:
             return citation
     return None
@@ -482,9 +484,9 @@ def _find_supporting_policy_citation(
     policy_citations: tuple[Citation, ...],
 ) -> Citation | None:
     for citation in policy_citations:
-        citation_texts = [citation.excerpt]
+        citation_texts = [citation.authoritative_text]
         if not _is_compound_policy_title(citation.section_title):
-            citation_texts.append(citation.section_title + citation.excerpt)
+            citation_texts.append(citation.section_title + citation.authoritative_text)
         for citation_text in citation_texts:
             citation_facts = _extract_policy_number_facts(citation_text)
             if any(
@@ -602,12 +604,12 @@ def _find_term_matching_policy_citation(
 
 
 def _citation_mentions_term(citation: Citation, term: str) -> bool:
-    if term in citation.section_title or term in citation.excerpt:
+    if term in citation.section_title or term in citation.authoritative_text:
         return True
     canonical_term = _canonical_policy_term(term)
     return (
         canonical_term in citation.section_title
-        or canonical_term in citation.excerpt
+        or canonical_term in citation.authoritative_text
     )
 
 
@@ -631,7 +633,7 @@ def _source_confusing_claim_supported(
     claim: str, policy_citations: tuple[Citation, ...]
 ) -> bool:
     citation_texts = [
-        _normalize_claim_text(citation.section_title + citation.excerpt)
+        _normalize_claim_text(citation.section_title + citation.authoritative_text)
         for citation in policy_citations
     ]
     if any(claim in citation_text for citation_text in citation_texts):
@@ -690,7 +692,7 @@ def _normalize_thousands_separators(text: str) -> str:
 
 def _citation_fragments(citation: Citation) -> tuple[str, ...]:
     title_fragments = _split_fragments(citation.section_title)
-    excerpt_fragments = _split_fragments(citation.excerpt)
+    excerpt_fragments = _split_fragments(citation.authoritative_text)
     combined_fragments = ()
     if len(title_fragments) == 1:
         combined_fragments = tuple(
@@ -702,4 +704,5 @@ def _citation_fragments(citation: Citation) -> tuple[str, ...]:
 
 
 def _citation_id(citation: Citation) -> str:
-    return f"{citation.source_name}:{citation.page_number}:{citation.section_title}"
+    pages = ",".join(str(page_number) for page_number in citation.page_numbers)
+    return f"{citation.source_name}:{pages or 'None'}:{citation.section_title}"

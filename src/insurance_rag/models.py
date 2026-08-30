@@ -3,6 +3,8 @@ from enum import Enum
 
 
 CHUNKING_STRATEGIES = frozenset({"legacy", "clause_v2"})
+PAGE_QUALITY_UNREADABLE = "unreadable_page"
+PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY = "severe_ocr_uncertainty"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,18 @@ class Citation:
     excerpt: str
     quality_notes: tuple[str, ...] = ()
     source_spans: tuple[SourceSpan, ...] = ()
+
+    @property
+    def authoritative_text(self) -> str:
+        if not self.source_spans:
+            return self.excerpt
+        return "\n".join(span.text for span in self.source_spans)
+
+    @property
+    def page_numbers(self) -> tuple[int, ...]:
+        if not self.source_spans:
+            return () if self.page_number is None else (self.page_number,)
+        return tuple(dict.fromkeys(span.page_number for span in self.source_spans))
 
 
 class GuardStatus(str, Enum):

@@ -183,6 +183,28 @@ def test_clause_v2_empty_page_stops_cross_page_continuation():
     assert "unknown_clause_page_fallback" in chunks[1].boundary_diagnostics
 
 
+def test_clause_v2_trailing_empty_page_leaves_observable_diagnostic():
+    pages = (
+        DocumentPage(
+            page_number=1,
+            text="第六条 等待期\n等待期为九十日。",
+            extraction_method="text",
+        ),
+        DocumentPage(page_number=2, text="", extraction_method="text"),
+    )
+
+    chunks = chunk_pages(
+        pages,
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )
+
+    assert "page_gap:empty" in chunks[-1].boundary_diagnostics
+
+
 @pytest.mark.parametrize(
     ("quality_note", "expected_diagnostic"),
     [
@@ -341,6 +363,57 @@ def test_clause_v2_uses_observable_windows_for_indivisible_overlong_sentence():
         span.text for chunk in chunks for span in chunk.source_spans
     )
     assert reconstructed == page.text
+
+
+def test_clause_v2_reconstruction_and_clause_purity_hold_across_boundary_modes():
+    pages = (
+        DocumentPage(
+            page_number=1,
+            text="投保人应如实告知。保险费应按时交纳。",
+            extraction_method="text",
+        ),
+        DocumentPage(
+            page_number=2,
+            text="第六条 等待期\n等待期自合同生效日起计算。",
+            extraction_method="text",
+        ),
+        DocumentPage(
+            page_number=3,
+            text="等待期为九十日。\n第七条 责任免除\n酒后驾驶导致的事故不承担保险责任。",
+            extraction_method="text",
+        ),
+    )
+
+    chunks = chunk_pages(
+        pages,
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+        target_chars=16,
+        hard_max_chars=28,
+    )
+
+    for page in pages:
+        coverage = [0] * len(page.text)
+        for chunk in chunks:
+            for span in chunk.source_spans:
+                if span.page_number != page.page_number:
+                    continue
+                assert page.text[span.start_char : span.end_char] == span.text
+                for offset in range(span.start_char, span.end_char):
+                    coverage[offset] += 1
+        assert all(
+            count == 1
+            for character, count in zip(page.text, coverage)
+            if not character.isspace()
+        )
+
+    assert all(
+        not ("第六条 等待期" in chunk.text and "第七条 责任免除" in chunk.text)
+        for chunk in chunks
+    )
 
 
 def test_clause_v2_source_spans_are_exact_slices_of_original_page_text():

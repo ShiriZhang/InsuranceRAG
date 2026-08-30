@@ -11,6 +11,8 @@ from insurance_rag.models import (
     ClauseMetadata,
     DocumentChunk,
     DocumentPage,
+    PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,
+    PAGE_QUALITY_UNREADABLE,
     SourceSpan,
 )
 
@@ -162,9 +164,9 @@ def _rejected_page_edge_medium_offsets(
 def _unsafe_page_gap_diagnostic(page: DocumentPage) -> str | None:
     if not page.text.strip():
         return "page_gap:empty"
-    if "unreadable_page" in page.quality_notes:
+    if PAGE_QUALITY_UNREADABLE in page.quality_notes:
         return "page_gap:unreadable"
-    if "severe_ocr_uncertainty" in page.quality_notes:
+    if PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY in page.quality_notes:
         return "page_gap:severe_ocr_uncertainty"
     return None
 
@@ -304,79 +306,84 @@ def _split_clause_v2_chunk(
     return split_chunks
 
 
-def chunk_pages(
+def _chunk_legacy_pages(
     pages: tuple[DocumentPage, ...],
+    *,
     source_name: str,
     source_type: str,
     chunk_size: int,
     overlap: int,
-    strategy: str = "legacy",
-    target_chars: int | None = None,
-    hard_max_chars: int | None = None,
 ) -> tuple[DocumentChunk, ...]:
-    if strategy not in CHUNKING_STRATEGIES:
-        raise ValueError(f"Unsupported chunking strategy: {strategy!r}")
+    chunks: list[DocumentChunk] = []
+    current_title = UNKNOWN_SECTION_TITLE
+    for page in pages:
+        if not page.text:
+            continue
+        for part in _split_text(page.text, chunk_size=chunk_size, overlap=overlap):
+            metadata = parse_clause_metadata(part, current_title=current_title)
+            current_title = metadata.section_title
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=(
+                        f"{source_type}:{source_name}:"
+                        f"p{page.page_number}:c{len(chunks) + 1}"
+                    ),
+                    text=part,
+                    page_number=page.page_number,
+                    section_title=metadata.section_title,
+                    source_type=source_type,
+                    source_name=source_name,
+                    extraction_method=page.extraction_method,
+                    quality_notes=page.quality_notes,
+                    clause_id=metadata.clause_id,
+                    heading_text=metadata.heading_text,
+                    heading_confidence=metadata.heading_confidence,
+                    heading_source=metadata.heading_source,
+                    boundary_diagnostics=("legacy_page_line_packing",),
+                )
+            )
+    return tuple(chunks)
 
-    if strategy == "clause_v2":
-        target_chars = chunk_size if target_chars is None else target_chars
-        hard_max_chars = chunk_size if hard_max_chars is None else hard_max_chars
-        if target_chars <= 0:
-            raise ValueError("target_chars must be positive")
-        if hard_max_chars < target_chars:
-            raise ValueError("hard_max_chars must be at least target_chars")
 
+def _chunk_clause_v2_pages(
+    pages: tuple[DocumentPage, ...],
+    *,
+    source_name: str,
+    source_type: str,
+    target_chars: int,
+    hard_max_chars: int,
+) -> tuple[DocumentChunk, ...]:
     chunks: list[DocumentChunk] = []
     current_title = UNKNOWN_SECTION_TITLE
     active_clause_chunk_index: int | None = None
     pending_gap_diagnostics: tuple[str, ...] = ()
-    rejected_offsets_by_page = (
-        _rejected_page_edge_medium_offsets(pages)
-        if strategy == "clause_v2"
-        else {}
-    )
+    rejected_offsets_by_page = _rejected_page_edge_medium_offsets(pages)
+
     for page_index, page in enumerate(pages):
-        gap_diagnostic = (
-            _unsafe_page_gap_diagnostic(page) if strategy == "clause_v2" else None
-        )
+        gap_diagnostic = _unsafe_page_gap_diagnostic(page)
         if gap_diagnostic is not None:
             active_clause_chunk_index = None
             current_title = UNKNOWN_SECTION_TITLE
-            pending_gap_diagnostics = (gap_diagnostic,)
-            continue
-        if not page.text:
-            continue
-        rejected_heading_offsets = rejected_offsets_by_page.get(page_index, set())
-        if strategy == "clause_v2":
-            parts = _split_single_page_clauses(
-                page.text,
-                rejected_heading_offsets,
+            pending_gap_diagnostics = tuple(
+                dict.fromkeys(pending_gap_diagnostics + (gap_diagnostic,))
             )
-        else:
-            parts = [
-                (part, None, None)
-                for part in _split_text(
-                    page.text,
-                    chunk_size=chunk_size,
-                    overlap=overlap,
-                )
-            ]
+            continue
+
+        rejected_heading_offsets = rejected_offsets_by_page.get(page_index, set())
+        parts = _split_single_page_clauses(page.text, rejected_heading_offsets)
         trusted_heading_starts = [
             source_start
             for part, source_start, _ in parts
             if parse_clause_metadata(part).heading_confidence in {"high", "medium"}
             and source_start not in rejected_heading_offsets
-            and source_start is not None
         ]
         first_trusted_heading_start = min(trusted_heading_starts, default=None)
+
         for part, source_start, source_end in parts:
             metadata = parse_clause_metadata(part, current_title=current_title)
-            rejected_in_part = (
-                source_start is not None
-                and source_end is not None
-                and any(
-                    source_start <= offset < source_end
-                    for offset in rejected_heading_offsets
-                )
+            rejected_in_part = any(
+                source_start <= offset < source_end
+                for offset in rejected_heading_offsets
             )
             if rejected_in_part and source_start in rejected_heading_offsets:
                 metadata = ClauseMetadata(
@@ -385,28 +392,26 @@ def chunk_pages(
                     heading_source="page_header_footer",
                 )
             current_title = metadata.section_title
-            retrieval_context = ""
-            boundary_diagnostics = ("legacy_page_line_packing",)
-            if strategy == "clause_v2":
-                if metadata.heading_confidence in {"high", "medium"}:
-                    retrieval_context = f"Policy Clause: {metadata.heading_text}"
-                    boundary_diagnostics = (
-                        f"trusted_heading:{metadata.heading_confidence}:{metadata.heading_source}",
-                    )
-                else:
-                    boundary_diagnostics = ("unknown_clause_page_fallback",)
-                if _has_low_confidence_heading_candidate(part):
-                    boundary_diagnostics += ("low_confidence_heading_candidate",)
-                if rejected_in_part:
-                    boundary_diagnostics += ("rejected_page_header_footer",)
-                boundary_diagnostics += pending_gap_diagnostics
-            strategy_id = "" if strategy == "legacy" else f":{strategy}"
-            chunk_id = (
-                f"{source_type}:{source_name}{strategy_id}:"
-                f"p{page.page_number}:c{len(chunks) + 1}"
-            )
+
+            if metadata.heading_confidence in {"high", "medium"}:
+                retrieval_context = f"Policy Clause: {metadata.heading_text}"
+                boundary_diagnostics = (
+                    f"trusted_heading:{metadata.heading_confidence}:{metadata.heading_source}",
+                )
+            else:
+                retrieval_context = ""
+                boundary_diagnostics = ("unknown_clause_page_fallback",)
+            if _has_low_confidence_heading_candidate(part):
+                boundary_diagnostics += ("low_confidence_heading_candidate",)
+            if rejected_in_part:
+                boundary_diagnostics += ("rejected_page_header_footer",)
+            boundary_diagnostics += pending_gap_diagnostics
+
             chunk = DocumentChunk(
-                chunk_id=chunk_id,
+                chunk_id=(
+                    f"{source_type}:{source_name}:clause_v2:"
+                    f"p{page.page_number}:c{len(chunks) + 1}"
+                ),
                 text=part,
                 page_number=page.page_number,
                 section_title=metadata.section_title,
@@ -420,33 +425,26 @@ def chunk_pages(
                 heading_source=metadata.heading_source,
                 retrieval_context=retrieval_context,
                 source_spans=(
-                    (
-                        SourceSpan(
-                            page_number=page.page_number,
-                            text=part,
-                            start_char=source_start,
-                            end_char=source_end,
-                        ),
-                    )
-                    if source_start is not None and source_end is not None
-                    else ()
+                    SourceSpan(
+                        page_number=page.page_number,
+                        text=part,
+                        start_char=source_start,
+                        end_char=source_end,
+                    ),
                 ),
                 boundary_diagnostics=boundary_diagnostics,
-                chunking_strategy=strategy,
+                chunking_strategy="clause_v2",
             )
-            if (
-                strategy == "clause_v2"
-                and metadata.heading_confidence == "low"
+            continues_active_clause = (
+                metadata.heading_confidence == "low"
                 and not rejected_in_part
                 and (
                     first_trusted_heading_start is None
-                    or (
-                        source_end is not None
-                        and source_end <= first_trusted_heading_start
-                    )
+                    or source_end <= first_trusted_heading_start
                 )
                 and active_clause_chunk_index is not None
-            ):
+            )
+            if continues_active_clause:
                 active_chunk = chunks[active_clause_chunk_index]
                 chunks[active_clause_chunk_index] = replace(
                     active_chunk,
@@ -465,14 +463,20 @@ def chunk_pages(
                 continue
 
             chunks.append(chunk)
-            if strategy == "clause_v2" and metadata.heading_confidence in {
-                "high",
-                "medium",
-            }:
+            if metadata.heading_confidence in {"high", "medium"}:
                 active_clause_chunk_index = len(chunks) - 1
             pending_gap_diagnostics = ()
-    if strategy != "clause_v2":
-        return tuple(chunks)
+
+    if pending_gap_diagnostics and chunks:
+        last_chunk = chunks[-1]
+        chunks[-1] = replace(
+            last_chunk,
+            boundary_diagnostics=tuple(
+                dict.fromkeys(
+                    last_chunk.boundary_diagnostics + pending_gap_diagnostics
+                )
+            ),
+        )
 
     split_chunks = [
         split_chunk
@@ -492,4 +496,40 @@ def chunk_pages(
             ),
         )
         for index, chunk in enumerate(split_chunks, start=1)
+    )
+
+
+def chunk_pages(
+    pages: tuple[DocumentPage, ...],
+    source_name: str,
+    source_type: str,
+    chunk_size: int,
+    overlap: int,
+    strategy: str = "legacy",
+    target_chars: int | None = None,
+    hard_max_chars: int | None = None,
+) -> tuple[DocumentChunk, ...]:
+    if strategy not in CHUNKING_STRATEGIES:
+        raise ValueError(f"Unsupported chunking strategy: {strategy!r}")
+    if strategy == "legacy":
+        return _chunk_legacy_pages(
+            pages,
+            source_name=source_name,
+            source_type=source_type,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+
+    resolved_target_chars = chunk_size if target_chars is None else target_chars
+    resolved_hard_max_chars = chunk_size if hard_max_chars is None else hard_max_chars
+    if resolved_target_chars <= 0:
+        raise ValueError("target_chars must be positive")
+    if resolved_hard_max_chars < resolved_target_chars:
+        raise ValueError("hard_max_chars must be at least target_chars")
+    return _chunk_clause_v2_pages(
+        pages,
+        source_name=source_name,
+        source_type=source_type,
+        target_chars=resolved_target_chars,
+        hard_max_chars=resolved_hard_max_chars,
     )

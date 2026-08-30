@@ -1,5 +1,5 @@
 from insurance_rag.citation_verifier import verify_answer_facts
-from insurance_rag.models import Citation
+from insurance_rag.models import Citation, SourceSpan
 
 
 def citation(title: str, excerpt: str, source_type: str = "user_policy") -> Citation:
@@ -21,6 +21,29 @@ def test_verifier_supports_numeric_fact_in_same_citation():
 
     assert result.facts[0].status == "supported"
     assert result.facts[0].severity == "info"
+
+
+def test_verifier_uses_full_cross_page_source_spans_beyond_display_excerpt():
+    cross_page_citation = Citation(
+        source_type="user_policy",
+        source_name="policy.pdf",
+        page_number=4,
+        section_title="等待期",
+        excerpt="第六条 等待期",
+        source_spans=(
+            SourceSpan(4, "第六条 等待期\n等待期自合同生效日起计算。", 0, 21),
+            SourceSpan(5, "等待期为九十日。", 0, 9),
+        ),
+    )
+
+    result = verify_answer_facts(
+        answer="等待期是90天。",
+        policy_citations=(cross_page_citation,),
+        builtin_citations=(),
+    )
+
+    assert result.facts[0].status == "supported"
+    assert result.facts[0].supporting_citation_ids == ("policy.pdf:4,5:等待期",)
 
 
 def test_verifier_supports_title_term_with_excerpt_number():

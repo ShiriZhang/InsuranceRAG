@@ -4,7 +4,11 @@ from pathlib import Path
 import fitz
 
 from insurance_rag.config import AppConfig
-from insurance_rag.models import DocumentPage, ParseResult
+from insurance_rag.models import (
+    DocumentPage,
+    PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,
+    ParseResult,
+)
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                 normalized_page = replace(
                     normalized_page,
                     quality_notes=normalized_page.quality_notes
-                    + ("severe_ocr_uncertainty",),
+                    + (PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,),
                 )
             pages.append(normalized_page)
 
