@@ -246,14 +246,28 @@ def _split_clause_v2_chunk(
     target_chars: int,
     hard_max_chars: int,
 ) -> list[DocumentChunk]:
+    if hard_max_chars < 3:
+        raise ValueError(
+            "hard_max_chars must allow heading context, separator, and source text"
+        )
+    context_uses_window = False
+    if chunk.retrieval_context:
+        max_context_chars = hard_max_chars - 2
+        compact_context = " ".join(
+            value
+            for value in (chunk.clause_id, chunk.section_title)
+            if value
+        )
+        if len(chunk.retrieval_context) > max_context_chars:
+            if len(compact_context) > max_context_chars:
+                compact_context = compact_context[:max_context_chars]
+                context_uses_window = True
+            chunk = replace(chunk, retrieval_context=compact_context)
+
     retrieval_prefix_chars = (
         len(chunk.retrieval_context) + 1 if chunk.retrieval_context else 0
     )
     body_hard_max_chars = hard_max_chars - retrieval_prefix_chars
-    if body_hard_max_chars <= 0:
-        raise ValueError(
-            "hard_max_chars must exceed clause heading retrieval context length"
-        )
     body_target_chars = max(1, target_chars - retrieval_prefix_chars)
 
     semantic_units: list[tuple[list[SourceSpan], bool]] = []
@@ -319,7 +333,7 @@ def _split_clause_v2_chunk(
     for spans, uses_window in packed:
         coalesced_spans = _coalesce_contiguous_spans(spans)
         diagnostics = chunk.boundary_diagnostics
-        if uses_window:
+        if uses_window or context_uses_window:
             diagnostics = tuple(
                 dict.fromkeys(diagnostics + (BOUNDARY_CHARACTER_WINDOW_FALLBACK,))
             )

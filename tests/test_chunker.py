@@ -365,6 +365,36 @@ def test_clause_v2_uses_observable_windows_for_indivisible_overlong_sentence():
     assert reconstructed == page.text
 
 
+def test_clause_v2_compacts_context_for_indivisible_overlong_trusted_heading():
+    heading = "第六条 保险责任：" + "附加说明" * 12
+    page = DocumentPage(
+        page_number=6,
+        text=f"{heading}\n本合同承担保险责任。",
+        extraction_method="text",
+    )
+
+    chunks = chunk_pages(
+        (page,),
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+        target_chars=16,
+        hard_max_chars=20,
+    )
+
+    assert all(len(chunk.retrieval_text) <= 20 for chunk in chunks)
+    assert all(chunk.retrieval_context for chunk in chunks)
+    assert any(
+        "character_window_fallback" in chunk.boundary_diagnostics
+        for chunk in chunks
+    )
+    assert "".join(
+        span.text for chunk in chunks for span in chunk.source_spans
+    ) == page.text
+
+
 def test_clause_v2_reconstruction_and_clause_purity_hold_across_boundary_modes():
     pages = (
         DocumentPage(
