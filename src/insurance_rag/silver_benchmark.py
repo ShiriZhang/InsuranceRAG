@@ -91,6 +91,11 @@ class AnnotationDraft:
     metadata: AnnotationMetadata
     hard_negative_spans: tuple[EvidenceSpan, ...] = ()
     annotation_uncertain: bool = False
+    additional_strata: tuple[str, ...] = ()
+
+    @property
+    def strata(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((self.stratum, *self.additional_strata)))
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,11 @@ class SilverCase:
     adjudicated: bool
     annotation_outcome: str
     annotation_metadata: tuple[AnnotationMetadata, ...]
+    additional_strata: tuple[str, ...] = ()
+
+    @property
+    def strata(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((self.stratum, *self.additional_strata)))
 
 
 @dataclass(frozen=True)
@@ -184,6 +194,7 @@ class FrozenBenchmark:
                     "question": case.question,
                     "evidence_spans": [asdict(span) for span in case.evidence_spans],
                     "stratum": case.stratum,
+                    "strata": list(case.strata),
                     "hard_negative_category": case.hard_negative_category,
                     "hard_negative_spans": [
                         asdict(span) for span in case.hard_negative_spans
@@ -381,6 +392,11 @@ def adjudicate_annotations(
             "source_id": source.source_id,
             "question": selected.question,
             "spans": [asdict(span) for span in selected.evidence_spans],
+            "strata": selected.strata,
+            "hard_negative_category": selected.hard_negative_category,
+            "hard_negative_spans": [
+                asdict(span) for span in selected.hard_negative_spans
+            ],
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -398,6 +414,7 @@ def adjudicate_annotations(
         adjudicated=adjudicated,
         annotation_outcome=outcome,
         annotation_metadata=tuple(metadata),
+        additional_strata=selected.additional_strata,
     )
 
 
@@ -771,6 +788,7 @@ def _validate_scored_case(source: BenchmarkSource, case: SilverCase) -> None:
         raise ValueError(
             "Hard-negative categories require exact hard-negative spans and vice versa."
         )
+    _validate_strata(case.stratum, case.additional_strata)
 
 
 def _validate_span(
@@ -808,6 +826,7 @@ def _validate_annotation(source: BenchmarkSource, annotation: AnnotationDraft) -
         raise ValueError(
             "Hard-negative categories require exact hard-negative spans and vice versa."
         )
+    _validate_strata(annotation.stratum, annotation.additional_strata)
 
 
 def _annotation_label(annotation: AnnotationDraft) -> tuple[object, ...]:
@@ -818,7 +837,16 @@ def _annotation_label(annotation: AnnotationDraft) -> tuple[object, ...]:
         annotation.hard_negative_category,
         annotation.hard_negative_spans,
         annotation.annotation_uncertain,
+        annotation.additional_strata,
     )
+
+
+def _validate_strata(stratum: str, additional_strata: tuple[str, ...]) -> None:
+    strata = (stratum, *additional_strata)
+    if any(not item.strip() for item in strata):
+        raise ValueError("Silver cases require non-empty strata identifiers.")
+    if len(set(strata)) != len(strata):
+        raise ValueError("Silver case strata identifiers must be unique.")
 
 
 def _covers_all_spans(
