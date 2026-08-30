@@ -168,24 +168,42 @@ def _valid_freeze_inputs():
             held_out_a,
             "cross_page_clause",
             additional_strata=("rule_plus_exception",),
+            disagreement=True,
+            adjudicated=True,
         ),
-        _case("valid-held-out-a-2", held_out_a, "internally_split_clause"),
-        _case("valid-held-out-b-1", held_out_b, "cross_page_clause"),
+        _case(
+            "valid-held-out-a-2",
+            held_out_a,
+            "internally_split_clause",
+            disagreement=True,
+            adjudicated=True,
+        ),
+        _case(
+            "valid-held-out-b-1",
+            held_out_b,
+            "cross_page_clause",
+            disagreement=True,
+            adjudicated=True,
+        ),
         _case(
             "valid-held-out-b-2",
             held_out_b,
             "rule_plus_exception",
             additional_strata=("internally_split_clause",),
+            disagreement=True,
+            adjudicated=True,
         ),
     )
     config = DatasetFreezeConfig(
         version="valid-release-v1",
+        benchmark_version="fixture-benchmark-v1",
+        document_split_version="valid-split-v1",
         key_held_out_strata=(
             "cross_page_clause",
             "rule_plus_exception",
             "internally_split_clause",
         ),
-        min_held_out_non_uncertain_cases=4,
+        min_held_out_adjudicated_non_uncertain_cases=4,
         min_held_out_cases_per_key_stratum=1,
         max_held_out_policy_share=0.5,
         max_held_out_product_family_share=0.5,
@@ -428,24 +446,40 @@ def test_freeze_silver_datasets_accepts_valid_release_and_report_has_no_source_c
             disagreement=True,
             adjudicated=True,
         ),
-        _case("held-out-a-2", held_out_a, "internally_split_clause"),
-        _case("held-out-b-1", held_out_b, "cross_page_clause"),
+        _case(
+            "held-out-a-2",
+            held_out_a,
+            "internally_split_clause",
+            disagreement=True,
+            adjudicated=True,
+        ),
+        _case(
+            "held-out-b-1",
+            held_out_b,
+            "cross_page_clause",
+            disagreement=True,
+            adjudicated=True,
+        ),
         _case(
             "held-out-b-2",
             held_out_b,
             "rule_plus_exception",
             additional_strata=("internally_split_clause",),
+            disagreement=True,
+            adjudicated=True,
         ),
     )
     benchmark = _benchmark(sources, development_cases + held_out_cases)
     config = DatasetFreezeConfig(
         version="fixture-release-v1",
+        benchmark_version="fixture-benchmark-v1",
+        document_split_version="fixture-split-v1",
         key_held_out_strata=(
             "cross_page_clause",
             "rule_plus_exception",
             "internally_split_clause",
         ),
-        min_held_out_non_uncertain_cases=4,
+        min_held_out_adjudicated_non_uncertain_cases=4,
         min_held_out_cases_per_key_stratum=1,
         max_held_out_policy_share=0.5,
         max_held_out_product_family_share=0.5,
@@ -539,16 +573,24 @@ def test_generation_revalidates_document_split_before_annotation_callbacks():
                 context_token_budget=100,
                 tokenizer_id="fixture-tokenizer-v1",
             ),
-            freeze_config=DatasetFreezeConfig(version="fixture-release-v1"),
+            freeze_config=DatasetFreezeConfig(
+                version="fixture-release-v1",
+                benchmark_version="fixture-benchmark-v1",
+                document_split_version="invalid-split-v1",
+            ),
         )
 
     assert annotation_calls == []
 
 
 def test_production_dataset_threshold_defaults_match_issue_16():
-    config = DatasetFreezeConfig(version="production-defaults-v1")
+    config = DatasetFreezeConfig(
+        version="production-defaults-v1",
+        benchmark_version="production-defaults-v1",
+        document_split_version="production-defaults-v1",
+    )
 
-    assert config.min_held_out_non_uncertain_cases == 200
+    assert config.min_held_out_adjudicated_non_uncertain_cases == 200
     assert config.min_held_out_cases_per_key_stratum == 30
     assert config.max_held_out_policy_share == 0.05
     assert config.max_held_out_product_family_share == 0.05
@@ -557,10 +599,47 @@ def test_production_dataset_threshold_defaults_match_issue_16():
     assert config.required_development_strata == REQUIRED_EVIDENCE_STRATA
 
 
+def test_held_out_minimum_counts_only_adjudicated_non_uncertain_cases():
+    benchmark, split, config = _valid_freeze_inputs()
+    agreed = replace(
+        benchmark.cases[-1],
+        initial_disagreement=False,
+        adjudicated=False,
+        annotation_outcome="agreed",
+    )
+
+    with pytest.raises(ValueError, match="got 3"):
+        freeze_silver_datasets(
+            benchmark=replace(benchmark, cases=(*benchmark.cases[:-1], agreed)),
+            document_split=split,
+            config=config,
+        )
+
+
+def test_release_config_must_bind_benchmark_and_document_split_versions():
+    benchmark, split, config = _valid_freeze_inputs()
+
+    with pytest.raises(ValueError, match="benchmark version"):
+        freeze_silver_datasets(
+            benchmark=benchmark,
+            document_split=split,
+            config=replace(config, benchmark_version="wrong-benchmark-v1"),
+        )
+    with pytest.raises(ValueError, match="document split version"):
+        freeze_silver_datasets(
+            benchmark=benchmark,
+            document_split=split,
+            config=replace(config, document_split_version="wrong-split-v1"),
+        )
+
+
 @pytest.mark.parametrize(
     ("config_change", "message"),
     [
-        ({"min_held_out_non_uncertain_cases": 5}, "at least 5 non-uncertain"),
+        (
+            {"min_held_out_adjudicated_non_uncertain_cases": 5},
+            "at least 5 adjudicated non-uncertain",
+        ),
         (
             {
                 "key_held_out_strata": ("single_sentence",),
@@ -637,7 +716,7 @@ def test_freeze_rejects_overall_and_per_stratum_uncertainty_limits():
             config=replace(
                 config,
                 max_uncertain_overall=0.10,
-                max_uncertain_per_key_stratum=0.20,
+                max_uncertain_per_key_stratum=0.30,
             ),
         )
 
@@ -682,6 +761,58 @@ def test_freeze_revalidates_exact_spans_against_manifest_hashed_source():
             document_split=split,
             config=config,
         )
+
+
+def test_release_manifest_maps_raw_spans_to_frozen_normalized_source():
+    benchmark, split, config = _valid_freeze_inputs()
+    original_source = split.sources_for(DatasetSplit.HELD_OUT)[0]
+    original_text = original_source.pages[0].text
+    changed_text = original_text.replace(" authoritative", "   authoritative")
+    changed_source = replace(
+        original_source,
+        pages=(replace(original_source.pages[0], text=changed_text),),
+    )
+    changed_sources = tuple(
+        changed_source if source.source_id == changed_source.source_id else source
+        for source in benchmark.sources
+    )
+    changed_cases = tuple(
+        replace(
+            case,
+            evidence_spans=(EvidenceSpan(1, 0, len(changed_text), changed_text),),
+        )
+        if case.source_id == changed_source.source_id
+        else case
+        for case in benchmark.cases
+    )
+    changed_split = freeze_document_split(
+        version=split.version,
+        sources=changed_sources,
+        assignments=split.assignments,
+    )
+
+    release = freeze_silver_datasets(
+        benchmark=replace(
+            benchmark,
+            sources=changed_sources,
+            cases=changed_cases,
+        ),
+        document_split=changed_split,
+        config=config,
+    )
+
+    case_id = next(
+        case.case_id for case in changed_cases if case.source_id == changed_source.source_id
+    )
+    normalized = " ".join(changed_text.split())
+    assert release.to_manifest()["normalized_reference_spans"][case_id] == [
+        {
+            "page_number": 1,
+            "start_char": 0,
+            "end_char": len(normalized),
+            "quote": normalized,
+        }
+    ]
 
 
 def test_release_hash_changes_when_frozen_selection_inputs_or_labels_change():

@@ -6,13 +6,16 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
 import json
+import re
 
+from insurance_rag.models import DocumentPage
 from insurance_rag.silver_benchmark import (
     APPROVED_SOURCE_TYPES,
     AdjudicationPass,
     AnnotationPass,
     BenchmarkConfig,
     BenchmarkSource,
+    EvidenceSpan,
     FrozenBenchmark,
     SilverCase,
     generate_frozen_benchmark,
@@ -88,22 +91,17 @@ class FrozenDocumentSplit:
 
     @property
     def manifest_sha256(self) -> str:
-        return _sha256(
-            json.dumps(
-                self.to_manifest(),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
+        return _manifest_sha256(self.to_manifest())
 
 
 @dataclass(frozen=True)
 class DatasetFreezeConfig:
     version: str
+    benchmark_version: str
+    document_split_version: str
     required_development_strata: tuple[str, ...] = REQUIRED_EVIDENCE_STRATA
     key_held_out_strata: tuple[str, ...] = KEY_BOUNDARY_SENSITIVE_STRATA
-    min_held_out_non_uncertain_cases: int = 200
+    min_held_out_adjudicated_non_uncertain_cases: int = 200
     min_held_out_cases_per_key_stratum: int = 30
     max_held_out_policy_share: float = 0.05
     max_held_out_product_family_share: float = 0.05
@@ -117,15 +115,26 @@ class DatasetFreezeConfig:
     )
 
     def __post_init__(self) -> None:
-        if not self.version.strip():
-            raise ValueError("A frozen dataset release requires a version.")
+        if any(
+            not identifier.strip()
+            for identifier in (
+                self.version,
+                self.benchmark_version,
+                self.document_split_version,
+            )
+        ):
+            raise ValueError(
+                "Dataset release, benchmark, and document split versions cannot be empty."
+            )
         _validate_unique_identifiers(
             "required_development_strata", self.required_development_strata
         )
         _validate_unique_identifiers("key_held_out_strata", self.key_held_out_strata)
         _validate_unique_identifiers("overlap_variants", self.overlap_variants)
-        if self.min_held_out_non_uncertain_cases <= 0:
-            raise ValueError("min_held_out_non_uncertain_cases must be positive.")
+        if self.min_held_out_adjudicated_non_uncertain_cases <= 0:
+            raise ValueError(
+                "min_held_out_adjudicated_non_uncertain_cases must be positive."
+            )
         if self.min_held_out_cases_per_key_stratum <= 0:
             raise ValueError("min_held_out_cases_per_key_stratum must be positive.")
         for name, value in (
@@ -160,6 +169,7 @@ class DatasetFreezeConfig:
 class DatasetSplitReport:
     total_cases: int
     non_uncertain_cases: int
+    adjudicated_non_uncertain_cases: int
     initial_disagreements: int
     adjudicated_cases: int
     uncertain_exclusions: int
@@ -230,6 +240,9 @@ class FrozenSilverDatasets:
             source.source_id
             for source in self.document_split.sources_for(DatasetSplit.HELD_OUT)
         }
+        source_by_id = {
+            source.source_id: source for source in self.benchmark.sources
+        }
         return {
             "version": self.config.version,
             "benchmark_manifest_sha256": self.benchmark.manifest_sha256,
@@ -237,6 +250,17 @@ class FrozenSilverDatasets:
             "freeze_config": asdict(self.config),
             "document_split_manifest": self.document_split.to_manifest(),
             "benchmark_manifest": self.benchmark.to_manifest(),
+            "normalized_reference_spans": {
+                case.case_id: [
+                    _normalized_span(
+                        source_by_id[case.source_id].pages,
+                        span,
+                    )
+                    for span in case.evidence_spans
+                ]
+                for case in self.benchmark.cases
+                if not case.annotation_uncertain
+            },
             "datasets": {
                 "development": [
                     case.case_id
@@ -253,14 +277,7 @@ class FrozenSilverDatasets:
 
     @property
     def manifest_sha256(self) -> str:
-        return _sha256(
-            json.dumps(
-                self.to_manifest(),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
+        return _manifest_sha256(self.to_manifest())
 
 
 def freeze_document_split(
@@ -350,6 +367,16 @@ def freeze_silver_datasets(
     document_split: FrozenDocumentSplit,
     config: DatasetFreezeConfig,
 ) -> FrozenSilverDatasets:
+    if benchmark.version != config.benchmark_version:
+        raise ValueError(
+            "Frozen benchmark version does not match the dataset release config: "
+            f"expected {config.benchmark_version!r}, got {benchmark.version!r}."
+        )
+    if document_split.version != config.document_split_version:
+        raise ValueError(
+            "Frozen document split version does not match the dataset release config: "
+            f"expected {config.document_split_version!r}, got {document_split.version!r}."
+        )
     validated_split = freeze_document_split(
         version=document_split.version,
         sources=document_split.sources,
@@ -407,7 +434,11 @@ def freeze_silver_datasets(
     development_cases = cases_by_split[DatasetSplit.DEVELOPMENT]
     held_out_cases = cases_by_split[DatasetSplit.HELD_OUT]
     development_counts = _stratum_counts(development_cases, non_uncertain_only=True)
-    held_out_counts = _stratum_counts(held_out_cases, non_uncertain_only=True)
+    held_out_counts = _stratum_counts(
+        held_out_cases,
+        non_uncertain_only=True,
+        adjudicated_only=True,
+    )
 
     missing_development = [
         stratum
@@ -420,14 +451,20 @@ def freeze_silver_datasets(
             + ", ".join(missing_development)
         )
 
-    non_uncertain_held_out = tuple(
-        case for case in held_out_cases if not case.annotation_uncertain
+    adjudicated_non_uncertain_held_out = tuple(
+        case
+        for case in held_out_cases
+        if case.adjudicated and not case.annotation_uncertain
     )
-    if len(non_uncertain_held_out) < config.min_held_out_non_uncertain_cases:
+    if (
+        len(adjudicated_non_uncertain_held_out)
+        < config.min_held_out_adjudicated_non_uncertain_cases
+    ):
         raise ValueError(
             "Held-out dataset requires at least "
-            f"{config.min_held_out_non_uncertain_cases} non-uncertain cases; "
-            f"got {len(non_uncertain_held_out)}."
+            f"{config.min_held_out_adjudicated_non_uncertain_cases} "
+            "adjudicated non-uncertain cases; "
+            f"got {len(adjudicated_non_uncertain_held_out)}."
         )
     undersized_strata = [
         stratum
@@ -451,7 +488,7 @@ def freeze_silver_datasets(
             f"{overall_uncertain_rate:.2%}."
         )
     key_uncertain_rates = {
-        stratum: _uncertain_rate_for_stratum(benchmark.cases, stratum)
+        stratum: _uncertain_rate_for_stratum(held_out_cases, stratum)
         for stratum in config.key_held_out_strata
     }
     unstable_strata = [
@@ -465,12 +502,14 @@ def freeze_silver_datasets(
             + ", ".join(unstable_strata)
         )
 
-    policy_counts = Counter(case.source_id for case in non_uncertain_held_out)
+    policy_counts = Counter(
+        case.source_id for case in adjudicated_non_uncertain_held_out
+    )
     product_counts = Counter(
         source_by_id[case.source_id].product_family
-        for case in non_uncertain_held_out
+        for case in adjudicated_non_uncertain_held_out
     )
-    held_out_total = len(non_uncertain_held_out)
+    held_out_total = len(adjudicated_non_uncertain_held_out)
     maximum_policy_share = max(
         (_rate(count, held_out_total) for count in policy_counts.values()),
         default=0.0,
@@ -544,8 +583,8 @@ def render_dataset_freeze_markdown(report: DatasetFreezeReport) -> str:
         f"Release version: `{report.version}`",
         f"Overall annotation_uncertain rate: {report.overall_uncertain_rate:.2%}",
         "",
-        "| Split | Total cases | Non-uncertain cases | Disagreement rate | Adjudication success rate | Exclusion rate |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Split | Total cases | Non-uncertain cases | Adjudicated non-uncertain | Disagreement rate | Adjudication success rate | Exclusion rate |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, summary in (
         ("development", report.development),
@@ -553,6 +592,7 @@ def render_dataset_freeze_markdown(report: DatasetFreezeReport) -> str:
     ):
         lines.append(
             f"| {name} | {summary.total_cases} | {summary.non_uncertain_cases} | "
+            f"{summary.adjudicated_non_uncertain_cases} | "
             f"{summary.disagreement_rate:.2%} | "
             f"{summary.adjudication_success_rate:.2%} | "
             f"{summary.exclusion_rate:.2%} |"
@@ -642,6 +682,7 @@ def _validate_frozen_case(source: BenchmarkSource, case: SilverCase) -> None:
             raise ValueError(
                 "Silver evidence span does not exactly map to the frozen source identified by its manifest hashes."
             )
+        _normalized_span(source.pages, span)
     if bool(case.hard_negative_category) != bool(case.hard_negative_spans):
         raise ValueError(
             "Hard-negative categories require exact hard-negative spans and vice versa."
@@ -652,10 +693,13 @@ def _stratum_counts(
     cases: tuple[SilverCase, ...],
     *,
     non_uncertain_only: bool,
+    adjudicated_only: bool = False,
 ) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for case in cases:
         if non_uncertain_only and case.annotation_uncertain:
+            continue
+        if adjudicated_only and not case.adjudicated:
             continue
         counts.update(case.strata)
     return dict(sorted(counts.items()))
@@ -673,6 +717,9 @@ def _split_report(cases: tuple[SilverCase, ...]) -> DatasetSplitReport:
     return DatasetSplitReport(
         total_cases=len(cases),
         non_uncertain_cases=sum(not case.annotation_uncertain for case in cases),
+        adjudicated_non_uncertain_cases=sum(
+            case.adjudicated and not case.annotation_uncertain for case in cases
+        ),
         initial_disagreements=sum(case.initial_disagreement for case in cases),
         adjudicated_cases=sum(case.adjudicated for case in cases),
         uncertain_exclusions=sum(case.annotation_uncertain for case in cases),
@@ -692,8 +739,67 @@ def _normalized_source_text(source: BenchmarkSource) -> str:
     )
 
 
+def _normalized_span(
+    pages: tuple[DocumentPage, ...],
+    span: EvidenceSpan,
+) -> dict[str, int | str]:
+    page = next(
+        (page for page in pages if page.page_number == span.page_number),
+        None,
+    )
+    if page is None:
+        raise ValueError(
+            "Silver evidence span does not map to a normalized source page."
+        )
+    normalized_chars: list[str] = []
+    normalized_position_by_raw_char: dict[int, int] = {}
+    for token_index, match in enumerate(re.finditer(r"\S+", page.text)):
+        if token_index:
+            normalized_chars.append(" ")
+        for offset, character in enumerate(match.group()):
+            normalized_position_by_raw_char[match.start() + offset] = len(
+                normalized_chars
+            )
+            normalized_chars.append(character)
+
+    mapped_positions = [
+        normalized_position_by_raw_char[index]
+        for index in range(span.start_char, span.end_char)
+        if index in normalized_position_by_raw_char
+    ]
+    normalized_quote = " ".join(span.quote.split())
+    if not mapped_positions or not normalized_quote:
+        raise ValueError(
+            "Silver evidence span cannot be empty after source normalization."
+        )
+    normalized_text = "".join(normalized_chars)
+    normalized_start = mapped_positions[0]
+    normalized_end = mapped_positions[-1] + 1
+    if normalized_text[normalized_start:normalized_end] != normalized_quote:
+        raise ValueError(
+            "Silver evidence span does not exactly map to the frozen normalized source."
+        )
+    return {
+        "page_number": span.page_number,
+        "start_char": normalized_start,
+        "end_char": normalized_end,
+        "quote": normalized_quote,
+    }
+
+
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _manifest_sha256(manifest: Mapping[str, object]) -> str:
+    return _sha256(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _rate(numerator: int, denominator: int) -> float:

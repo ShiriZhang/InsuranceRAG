@@ -35,6 +35,13 @@ QUERY_REWRITE_VERSION = "production-v1"
 RERANKER_VERSION = "rules-v1"
 
 
+def _combine_unique_strata(
+    stratum: str,
+    additional_strata: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((stratum, *additional_strata)))
+
+
 class Embedder(Protocol):
     model_id: str
 
@@ -95,7 +102,7 @@ class AnnotationDraft:
 
     @property
     def strata(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys((self.stratum, *self.additional_strata)))
+        return _combine_unique_strata(self.stratum, self.additional_strata)
 
 
 @dataclass(frozen=True)
@@ -116,7 +123,7 @@ class SilverCase:
 
     @property
     def strata(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys((self.stratum, *self.additional_strata)))
+        return _combine_unique_strata(self.stratum, self.additional_strata)
 
 
 @dataclass(frozen=True)
