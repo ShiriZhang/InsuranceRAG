@@ -50,6 +50,11 @@ def _source(
                 text=f"{source_id} authoritative policy text",
                 extraction_method="text",
             ),
+            DocumentPage(
+                page_number=2,
+                text=f"{source_id} continued policy text",
+                extraction_method="text",
+            ),
         ),
     )
 
@@ -65,13 +70,18 @@ def _case(
     adjudicated: bool = False,
 ) -> SilverCase:
     quote = source.pages[0].text
+    evidence_spans = () if uncertain else (EvidenceSpan(1, 0, len(quote), quote),)
+    if not uncertain and "cross_page_clause" in (stratum, *additional_strata):
+        second_quote = source.pages[1].text
+        evidence_spans = (
+            *evidence_spans,
+            EvidenceSpan(2, 0, len(second_quote), second_quote),
+        )
     return SilverCase(
         case_id=case_id,
         source_id=source.source_id,
         question=f"SECRET QUESTION {case_id}",
-        evidence_spans=()
-        if uncertain
-        else (EvidenceSpan(1, 0, len(quote), quote),),
+        evidence_spans=evidence_spans,
         stratum=stratum,
         hard_negative_category=None,
         hard_negative_spans=(),
@@ -599,7 +609,7 @@ def test_production_dataset_threshold_defaults_match_issue_16():
     assert config.required_development_strata == REQUIRED_EVIDENCE_STRATA
 
 
-def test_held_out_minimum_counts_only_adjudicated_non_uncertain_cases():
+def test_held_out_minimum_accepts_agreed_non_uncertain_cases():
     benchmark, split, config = _valid_freeze_inputs()
     agreed = replace(
         benchmark.cases[-1],
@@ -608,12 +618,13 @@ def test_held_out_minimum_counts_only_adjudicated_non_uncertain_cases():
         annotation_outcome="agreed",
     )
 
-    with pytest.raises(ValueError, match="got 3"):
-        freeze_silver_datasets(
-            benchmark=replace(benchmark, cases=(*benchmark.cases[:-1], agreed)),
-            document_split=split,
-            config=config,
-        )
+    frozen = freeze_silver_datasets(
+        benchmark=replace(benchmark, cases=(*benchmark.cases[:-1], agreed)),
+        document_split=split,
+        config=config,
+    )
+
+    assert frozen.report.held_out.adjudicated_non_uncertain_cases == 4
 
 
 def test_release_config_must_bind_benchmark_and_document_split_versions():
@@ -638,7 +649,7 @@ def test_release_config_must_bind_benchmark_and_document_split_versions():
     [
         (
             {"min_held_out_adjudicated_non_uncertain_cases": 5},
-            "at least 5 adjudicated non-uncertain",
+            "at least 5 protocol-complete non-uncertain",
         ),
         (
             {
@@ -770,7 +781,10 @@ def test_release_manifest_maps_raw_spans_to_frozen_normalized_source():
     changed_text = original_text.replace(" authoritative", "   authoritative")
     changed_source = replace(
         original_source,
-        pages=(replace(original_source.pages[0], text=changed_text),),
+        pages=(
+            replace(original_source.pages[0], text=changed_text),
+            original_source.pages[1],
+        ),
     )
     changed_sources = tuple(
         changed_source if source.source_id == changed_source.source_id else source
@@ -779,7 +793,21 @@ def test_release_manifest_maps_raw_spans_to_frozen_normalized_source():
     changed_cases = tuple(
         replace(
             case,
-            evidence_spans=(EvidenceSpan(1, 0, len(changed_text), changed_text),),
+            evidence_spans=(
+                EvidenceSpan(1, 0, len(changed_text), changed_text),
+                *(
+                    (
+                        EvidenceSpan(
+                            2,
+                            0,
+                            len(changed_source.pages[1].text),
+                            changed_source.pages[1].text,
+                        ),
+                    )
+                    if "cross_page_clause" in case.strata
+                    else ()
+                ),
+            ),
         )
         if case.source_id == changed_source.source_id
         else case
@@ -805,14 +833,12 @@ def test_release_manifest_maps_raw_spans_to_frozen_normalized_source():
         case.case_id for case in changed_cases if case.source_id == changed_source.source_id
     )
     normalized = " ".join(changed_text.split())
-    assert release.to_manifest()["normalized_reference_spans"][case_id] == [
-        {
-            "page_number": 1,
-            "start_char": 0,
-            "end_char": len(normalized),
-            "quote": normalized,
-        }
-    ]
+    assert release.to_manifest()["normalized_reference_spans"][case_id][0] == {
+        "page_number": 1,
+        "start_char": 0,
+        "end_char": len(normalized),
+        "quote": normalized,
+    }
 
 
 def test_release_hash_changes_when_frozen_selection_inputs_or_labels_change():

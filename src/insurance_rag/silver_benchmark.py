@@ -16,6 +16,7 @@ from insurance_rag.models import DocumentChunk, DocumentPage
 from insurance_rag.query_rewriter import rewrite_query
 from insurance_rag.retriever import InMemoryVectorIndex
 from insurance_rag.rule_reranker import rerank_results
+from insurance_rag.silver_normalization import normalized_source_text
 
 
 class SourceApproval(str, Enum):
@@ -90,6 +91,17 @@ class AnnotationMetadata:
 
 
 @dataclass(frozen=True)
+class AnnotationResponseMetadata:
+    response_id: str
+    system_fingerprint: str | None
+    request_timestamp: str
+    retry_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    draft_order: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AnnotationDraft:
     question: str
     evidence_spans: tuple[EvidenceSpan, ...]
@@ -99,6 +111,8 @@ class AnnotationDraft:
     hard_negative_spans: tuple[EvidenceSpan, ...] = ()
     annotation_uncertain: bool = False
     additional_strata: tuple[str, ...] = ()
+    response_metadata: AnnotationResponseMetadata | None = None
+    slot_id: str = ""
 
     @property
     def strata(self) -> tuple[str, ...]:
@@ -120,6 +134,8 @@ class SilverCase:
     annotation_outcome: str
     annotation_metadata: tuple[AnnotationMetadata, ...]
     additional_strata: tuple[str, ...] = ()
+    annotation_response_metadata: tuple[AnnotationResponseMetadata, ...] = ()
+    annotation_slot_id: str = ""
 
     @property
     def strata(self) -> tuple[str, ...]:
@@ -166,7 +182,7 @@ class FrozenBenchmark:
         source_records = []
         for source in self.sources:
             source_text = _source_text(source.pages)
-            normalized_text = _normalized_source_text(source.pages)
+            normalized_text = normalized_source_text(source.pages)
             source_records.append(
                 {
                     "source_id": source.source_id,
@@ -210,6 +226,11 @@ class FrozenBenchmark:
                     "initial_disagreement": case.initial_disagreement,
                     "adjudicated": case.adjudicated,
                     "annotation_outcome": case.annotation_outcome,
+                    "annotation_slot_id": case.annotation_slot_id,
+                    "annotation_responses": [
+                        asdict(response)
+                        for response in case.annotation_response_metadata
+                    ],
                 }
                 for case in self.cases
             ],
@@ -344,7 +365,11 @@ def generate_frozen_benchmark(
         pairs = tuple(zip(first_annotations, second_annotations))
         annotation_pairs[source.source_id] = pairs
         for case_index, (first, second) in enumerate(pairs):
-            if _annotation_label(first) != _annotation_label(second):
+            if (
+                first.annotation_uncertain
+                or second.annotation_uncertain
+                or _annotation_label(first) != _annotation_label(second)
+            ):
                 adjudications[(source.source_id, case_index)] = adjudication_pass(
                     source, first, second
                 )
@@ -369,8 +394,17 @@ def adjudicate_annotations(
     if first.metadata.annotator_id == second.metadata.annotator_id:
         raise ValueError("Two independent annotations require different annotator IDs.")
 
-    agreed = _annotation_label(first) == _annotation_label(second)
+    agreed = (
+        not first.annotation_uncertain
+        and not second.annotation_uncertain
+        and _annotation_label(first) == _annotation_label(second)
+    )
     metadata = [first.metadata, second.metadata]
+    response_metadata = [
+        response
+        for response in (first.response_metadata, second.response_metadata)
+        if response is not None
+    ]
     if agreed:
         selected = first
         outcome = "agreed"
@@ -386,6 +420,8 @@ def adjudicate_annotations(
         _validate_annotation(source, adjudication)
         selected = adjudication
         metadata.append(adjudication.metadata)
+        if adjudication.response_metadata is not None:
+            response_metadata.append(adjudication.response_metadata)
         outcome = "annotation_uncertain" if adjudication.annotation_uncertain else "adjudicated"
         adjudicated = True
 
@@ -422,6 +458,8 @@ def adjudicate_annotations(
         annotation_outcome=outcome,
         annotation_metadata=tuple(metadata),
         additional_strata=selected.additional_strata,
+        annotation_response_metadata=tuple(response_metadata),
+        annotation_slot_id=selected.slot_id,
     )
 
 
@@ -990,12 +1028,6 @@ def _paired_confidence_interval(
 def _source_text(pages: tuple[DocumentPage, ...]) -> str:
     return "\n\f\n".join(
         f"page:{page.page_number}\n{page.text}" for page in pages
-    )
-
-
-def _normalized_source_text(pages: tuple[DocumentPage, ...]) -> str:
-    return "\n\f\n".join(
-        f"page:{page.page_number}\n{' '.join(page.text.split())}" for page in pages
     )
 
 

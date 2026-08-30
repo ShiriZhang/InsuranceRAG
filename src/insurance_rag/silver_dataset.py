@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
 import json
-import re
 
 from insurance_rag.models import DocumentPage
 from insurance_rag.silver_benchmark import (
@@ -20,6 +19,7 @@ from insurance_rag.silver_benchmark import (
     SilverCase,
     generate_frozen_benchmark,
 )
+from insurance_rag.silver_normalization import normalize_page, normalized_source_text
 
 
 REQUIRED_EVIDENCE_STRATA = (
@@ -74,7 +74,7 @@ class FrozenDocumentSplit:
         for assignment in sorted(self.assignments, key=lambda item: item.source_id):
             source = source_by_id[assignment.source_id]
             source_text = _source_text(source)
-            normalized_text = _normalized_source_text(source)
+            normalized_text = normalized_source_text(source.pages)
             records.append(
                 {
                     "source_id": source.source_id,
@@ -437,7 +437,6 @@ def freeze_silver_datasets(
     held_out_counts = _stratum_counts(
         held_out_cases,
         non_uncertain_only=True,
-        adjudicated_only=True,
     )
 
     missing_development = [
@@ -451,20 +450,18 @@ def freeze_silver_datasets(
             + ", ".join(missing_development)
         )
 
-    adjudicated_non_uncertain_held_out = tuple(
-        case
-        for case in held_out_cases
-        if case.adjudicated and not case.annotation_uncertain
+    protocol_complete_non_uncertain_held_out = tuple(
+        case for case in held_out_cases if not case.annotation_uncertain
     )
     if (
-        len(adjudicated_non_uncertain_held_out)
+        len(protocol_complete_non_uncertain_held_out)
         < config.min_held_out_adjudicated_non_uncertain_cases
     ):
         raise ValueError(
             "Held-out dataset requires at least "
             f"{config.min_held_out_adjudicated_non_uncertain_cases} "
-            "adjudicated non-uncertain cases; "
-            f"got {len(adjudicated_non_uncertain_held_out)}."
+            "protocol-complete non-uncertain cases; "
+            f"got {len(protocol_complete_non_uncertain_held_out)}."
         )
     undersized_strata = [
         stratum
@@ -503,13 +500,13 @@ def freeze_silver_datasets(
         )
 
     policy_counts = Counter(
-        case.source_id for case in adjudicated_non_uncertain_held_out
+        case.source_id for case in protocol_complete_non_uncertain_held_out
     )
     product_counts = Counter(
         source_by_id[case.source_id].product_family
-        for case in adjudicated_non_uncertain_held_out
+        for case in protocol_complete_non_uncertain_held_out
     )
-    held_out_total = len(adjudicated_non_uncertain_held_out)
+    held_out_total = len(protocol_complete_non_uncertain_held_out)
     maximum_policy_share = max(
         (_rate(count, held_out_total) for count in policy_counts.values()),
         default=0.0,
@@ -648,6 +645,14 @@ def _validate_frozen_case(source: BenchmarkSource, case: SilverCase) -> None:
         raise ValueError("annotation_uncertain cases cannot freeze evidence spans.")
     if not case.annotation_uncertain and not case.evidence_spans:
         raise ValueError("Every accepted Silver case requires exact evidence spans.")
+    if (
+        not case.annotation_uncertain
+        and "cross_page_clause" in strata
+        and len({span.page_number for span in case.evidence_spans}) < 2
+    ):
+        raise ValueError(
+            "Accepted cross_page_clause cases require evidence on at least two pages."
+        )
     if case.annotation_uncertain:
         if not (
             case.initial_disagreement
@@ -693,13 +698,10 @@ def _stratum_counts(
     cases: tuple[SilverCase, ...],
     *,
     non_uncertain_only: bool,
-    adjudicated_only: bool = False,
 ) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for case in cases:
         if non_uncertain_only and case.annotation_uncertain:
-            continue
-        if adjudicated_only and not case.adjudicated:
             continue
         counts.update(case.strata)
     return dict(sorted(counts.items()))
@@ -718,7 +720,7 @@ def _split_report(cases: tuple[SilverCase, ...]) -> DatasetSplitReport:
         total_cases=len(cases),
         non_uncertain_cases=sum(not case.annotation_uncertain for case in cases),
         adjudicated_non_uncertain_cases=sum(
-            case.adjudicated and not case.annotation_uncertain for case in cases
+            not case.annotation_uncertain for case in cases
         ),
         initial_disagreements=sum(case.initial_disagreement for case in cases),
         adjudicated_cases=sum(case.adjudicated for case in cases),
@@ -729,13 +731,6 @@ def _split_report(cases: tuple[SilverCase, ...]) -> DatasetSplitReport:
 def _source_text(source: BenchmarkSource) -> str:
     return "\n\f\n".join(
         f"page:{page.page_number}\n{page.text}" for page in source.pages
-    )
-
-
-def _normalized_source_text(source: BenchmarkSource) -> str:
-    return "\n\f\n".join(
-        f"page:{page.page_number}\n{' '.join(page.text.split())}"
-        for page in source.pages
     )
 
 
@@ -751,28 +746,19 @@ def _normalized_span(
         raise ValueError(
             "Silver evidence span does not map to a normalized source page."
         )
-    normalized_chars: list[str] = []
-    normalized_position_by_raw_char: dict[int, int] = {}
-    for token_index, match in enumerate(re.finditer(r"\S+", page.text)):
-        if token_index:
-            normalized_chars.append(" ")
-        for offset, character in enumerate(match.group()):
-            normalized_position_by_raw_char[match.start() + offset] = len(
-                normalized_chars
-            )
-            normalized_chars.append(character)
+    normalized = normalize_page(page)
 
     mapped_positions = [
-        normalized_position_by_raw_char[index]
+        normalized.raw_to_normalized[index]
         for index in range(span.start_char, span.end_char)
-        if index in normalized_position_by_raw_char
+        if index in normalized.raw_to_normalized
     ]
     normalized_quote = " ".join(span.quote.split())
     if not mapped_positions or not normalized_quote:
         raise ValueError(
             "Silver evidence span cannot be empty after source normalization."
         )
-    normalized_text = "".join(normalized_chars)
+    normalized_text = normalized.text
     normalized_start = mapped_positions[0]
     normalized_end = mapped_positions[-1] + 1
     if normalized_text[normalized_start:normalized_end] != normalized_quote:

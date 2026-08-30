@@ -348,6 +348,43 @@ def test_generation_is_evidence_first_and_annotators_never_receive_chunks():
     assert benchmark.cases[0].annotation_outcome == "agreed"
 
 
+def test_generation_adjudicates_even_when_both_passes_return_same_uncertain_label():
+    source = _source()
+    uncertain_first = AnnotationDraft(
+        question="等待期是多久？",
+        evidence_spans=(),
+        stratum="single_sentence",
+        hard_negative_category=None,
+        metadata=_metadata("first", "model-a"),
+        annotation_uncertain=True,
+    )
+    uncertain_second = replace(
+        uncertain_first,
+        metadata=_metadata("second", "model-b"),
+    )
+    adjudication_calls: list[str] = []
+
+    def adjudication_pass(received_source, _first, _second):
+        adjudication_calls.append(received_source.source_id)
+        return replace(
+            _draft("third", "model-c"),
+            hard_negative_category=None,
+            hard_negative_spans=(),
+        )
+
+    benchmark = generate_frozen_benchmark(
+        sources=(source,),
+        first_pass=lambda _source: (uncertain_first,),
+        second_pass=lambda _source: (uncertain_second,),
+        adjudication_pass=adjudication_pass,
+        config=_config(),
+    )
+
+    assert adjudication_calls == [source.source_id]
+    assert benchmark.cases[0].adjudicated is True
+    assert benchmark.cases[0].annotation_outcome == "adjudicated"
+
+
 def test_source_fixture_runs_through_production_pdf_page_parser():
     pdf = fitz.open()
     page = pdf.new_page()

@@ -1,0 +1,69 @@
+{
+  "approval_reference": "project-owner-approved-documents-for-llm-annotation/2026-08-30",
+  "versions": {
+    "document_split": "silver-document-split/v1.0.0",
+    "benchmark": "silver-evidence-benchmark/v1.0.0",
+    "release": "clause-v2-silver/v1.0.0",
+    "schema": "silver-evidence-schema/v1.0.0",
+    "normalization": "normalized-page-text/v1.0.0"
+  },
+  "prompt_versions": {
+    "annotator": "silver-evidence-annotator/v1.0.0",
+    "adjudicator": "silver-evidence-adjudicator/v1.0.0"
+  },
+  "passes": {
+    "annotator_a": {
+      "annotator_id": "groq-annotator-a",
+      "model_id": "openai/gpt-oss-120b",
+      "prompt_version": "silver-evidence-annotator/v1.0.0",
+      "schema_version": "silver-evidence-schema/v1.0.0",
+      "reasoning_effort": "medium",
+      "temperature": 0,
+      "top_p": 1,
+      "seed": 16001,
+      "max_completion_tokens": 4096,
+      "max_retries": 2
+    },
+    "annotator_b": {
+      "annotator_id": "groq-annotator-b",
+      "model_id": "openai/gpt-oss-20b",
+      "prompt_version": "silver-evidence-annotator/v1.0.0",
+      "schema_version": "silver-evidence-schema/v1.0.0",
+      "reasoning_effort": "medium",
+      "temperature": 0,
+      "top_p": 1,
+      "seed": 16002,
+      "max_completion_tokens": 4096,
+      "max_retries": 2
+    },
+    "adjudicator": {
+      "annotator_id": "groq-adjudicator-c",
+      "model_id": "openai/gpt-oss-120b",
+      "prompt_version": "silver-evidence-adjudicator/v1.0.0",
+      "schema_version": "silver-evidence-schema/v1.0.0",
+      "reasoning_effort": "medium",
+      "temperature": 0,
+      "top_p": 1,
+      "seed": 16003,
+      "max_completion_tokens": 4096,
+      "max_retries": 2
+    }
+  },
+  "dataset": {
+    "held_out_fraction": 0.3,
+    "split_seed": "silver-document-split/v1.0.0",
+    "development_cases_per_source": 3,
+    "held_out_cases_per_source": 5,
+    "annotation_input_char_limit": 100000,
+    "annotation_window_char_limit": 1400,
+    "size_grid": [[600, 900], [900, 1200], [1200, 1600]],
+    "context_token_budgets": [2000, 4000, 8000],
+    "primary_context_token_budget": 4000,
+    "overlap_variants": ["zero_body_overlap", "preceding_semantic_unit"]
+  },
+  "benchmark": {
+    "retrieval_depth": 20,
+    "embedding_model_id": "text-embedding-3-small",
+    "tokenizer_id": "cl100k_base"
+  }
+}
