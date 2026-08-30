@@ -1,8 +1,9 @@
 from dataclasses import replace
 
+from insurance_rag.chunker import chunk_pages
 from insurance_rag.config import AppConfig
 from insurance_rag.hybrid_retriever import HybridSearchResult
-from insurance_rag.models import DocumentChunk, GuardStatus, QueryRewriteResult
+from insurance_rag.models import DocumentChunk, DocumentPage, GuardStatus, QueryRewriteResult
 from insurance_rag.rag_chain import (
     REFUSAL_ANSWER,
     RagChain,
@@ -120,6 +121,52 @@ def test_build_citation_uses_chunk_metadata():
     assert citation.section_title == "等待期"
     assert citation.excerpt == "等待期为九十日。"
     assert citation.quality_notes == ("扫描件文字可能不完整",)
+
+
+def test_build_citation_excludes_retrieval_only_heading_context():
+    chunk = chunk_pages(
+        (DocumentPage(4, "第六条 等待期\n等待期为九十日。", "text"),),
+        source_name="user.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )[0]
+
+    citation = build_citation(chunk)
+
+    assert citation.excerpt == "第六条 等待期 等待期为九十日。"
+    assert "Policy Clause" not in citation.excerpt
+
+
+def test_build_citation_prefers_authoritative_source_spans():
+    chunk = chunk_pages(
+        (DocumentPage(4, "第六条 等待期\n等待期为九十日。", "text"),),
+        source_name="user.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )[0]
+
+    citation = build_citation(replace(chunk, text="fabricated retrieval copy"))
+
+    assert citation.excerpt == "第六条 等待期 等待期为九十日。"
+
+
+def test_build_messages_excludes_retrieval_only_heading_context():
+    chunk = chunk_pages(
+        (DocumentPage(4, "第六条 等待期\n等待期为九十日。", "text"),),
+        source_name="user.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )[0]
+
+    messages = build_messages("等待期是多少？", [chunk], [])
+
+    assert "Policy Clause" not in "\n".join(message["content"] for message in messages)
 
 
 def test_build_citation_normalizes_whitespace_and_truncates():

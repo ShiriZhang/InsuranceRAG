@@ -139,11 +139,23 @@ class HybridRetriever:
     ) -> None:
         self.chunks: tuple[DocumentChunk, ...] = tuple(chunks)
         self.vector_index = vector_index
+        compatibility_keys = {
+            chunk.index_compatibility_key for chunk in self.chunks
+        }
+        if len(compatibility_keys) > 1:
+            raise ValueError("Retriever chunks must use one chunking strategy.")
+        index_key = getattr(vector_index, "index_compatibility_key", None)
+        if compatibility_keys and index_key is None:
+            raise ValueError("Vector index is missing chunking compatibility identity.")
+        if compatibility_keys and index_key != next(iter(compatibility_keys)):
+            raise ValueError(
+                "Vector index and retriever chunks use incompatible chunking strategy."
+            )
         self.embedder = embedder
         self.rrf_k = rrf_k
         self.retrieval_mode = retrieval_mode
         self._tokenized_chunks = [
-            tokenize_for_bm25(chunk.text) for chunk in self.chunks
+            tokenize_for_bm25(chunk.retrieval_text) for chunk in self.chunks
         ]
         self._chunk_token_sets = [set(tokens) for tokens in self._tokenized_chunks]
         self._bm25 = None
@@ -261,7 +273,7 @@ class HybridRetriever:
                     query_token_set,
                     self._chunk_token_sets[index],
                     query,
-                    chunk.text,
+                    chunk.retrieval_text,
                 )
             )
             merged.add_rank_detail(

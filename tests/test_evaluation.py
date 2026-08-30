@@ -7,6 +7,7 @@ from uuid import uuid4
 import fitz
 import pytest
 
+from insurance_rag.config import AppConfig
 from insurance_rag.evaluation import (
     DeterministicEvalEmbedder,
     evaluate_hard_negative_cases,
@@ -164,6 +165,28 @@ def test_local_document_evaluation_scores_real_pdf_terms():
     assert "# InsuranceRAG Local Document Evaluation Report" in markdown
     assert "Top3" in markdown
     assert "等待期" in markdown
+
+
+def test_local_document_evaluation_uses_selected_chunking_strategy():
+    docs_dir = _repo_tmp_dir("local-docs-clause-v2")
+    _write_pdf(
+        docs_dir / "sample.pdf",
+        "第六条 等待期\n等待期为九十日。\n第七条 保险责任\n本合同承担重大疾病保险责任。",
+    )
+    config = AppConfig(
+        openai_api_key=None,
+        ocr_enabled=False,
+        chunking_strategy="clause_v2",
+    )
+
+    report = evaluate_local_documents(
+        docs_dir,
+        sample_limit=1,
+        top_k=3,
+        config=config,
+    )
+
+    assert report.total_chunks == 2
 
 
 def test_local_hard_negative_evaluation_builds_cases_from_pdf():

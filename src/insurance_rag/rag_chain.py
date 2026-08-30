@@ -26,13 +26,13 @@ def should_use_builtin_context(question: str, policy_result_count: int) -> bool:
 
 
 def build_citation(chunk: DocumentChunk, max_chars: int = 180) -> Citation:
-    excerpt = " ".join(chunk.text.split())
+    excerpt = " ".join(chunk.authoritative_text.split())
     if len(excerpt) > max_chars:
         excerpt = excerpt[:max_chars].rstrip() + "..."
     return Citation(
         source_type=chunk.source_type,
         source_name=chunk.source_name,
-        page_number=chunk.page_number,
+        page_number=chunk.authoritative_page_number,
         section_title=chunk.section_title,
         excerpt=excerpt,
         quality_notes=chunk.quality_notes,
@@ -46,7 +46,7 @@ def _format_context(title: str, chunks: list[DocumentChunk]) -> str:
     for index, chunk in enumerate(chunks, start=1):
         page = f"第 {chunk.page_number} 页" if chunk.page_number is not None else "页码未知"
         lines.append(
-            f"[{index}] {chunk.source_name}｜{page}｜{chunk.section_title}\n{chunk.text}"
+            f"[{index}] {chunk.source_name}｜{page}｜{chunk.section_title}\n{chunk.authoritative_text}"
         )
     return "\n\n".join(lines)
 

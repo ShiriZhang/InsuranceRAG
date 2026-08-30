@@ -2,6 +2,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+CHUNKING_STRATEGIES = frozenset({"legacy", "clause_v2"})
+
+
 @dataclass(frozen=True)
 class DocumentPage:
     page_number: int
@@ -20,6 +23,14 @@ class ClauseMetadata:
 
 
 @dataclass(frozen=True)
+class SourceSpan:
+    page_number: int
+    text: str
+    start_char: int
+    end_char: int
+
+
+@dataclass(frozen=True)
 class DocumentChunk:
     chunk_id: str
     text: str
@@ -33,6 +44,32 @@ class DocumentChunk:
     heading_text: str | None = None
     heading_confidence: str = "low"
     heading_source: str = "fallback"
+    retrieval_context: str = ""
+    source_spans: tuple[SourceSpan, ...] = ()
+    boundary_diagnostics: tuple[str, ...] = ()
+    chunking_strategy: str = "legacy"
+
+    @property
+    def retrieval_text(self) -> str:
+        if not self.retrieval_context:
+            return self.text
+        return f"{self.retrieval_context}\n{self.text}"
+
+    @property
+    def authoritative_text(self) -> str:
+        if not self.source_spans:
+            return self.text
+        return "\n".join(span.text for span in self.source_spans)
+
+    @property
+    def authoritative_page_number(self) -> int | None:
+        if not self.source_spans:
+            return self.page_number
+        return self.source_spans[0].page_number
+
+    @property
+    def index_compatibility_key(self) -> str:
+        return f"chunking:{self.chunking_strategy}"
 
 
 @dataclass(frozen=True)

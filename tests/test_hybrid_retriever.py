@@ -1,12 +1,13 @@
 import pytest
 
 import insurance_rag.hybrid_retriever as hybrid_module
+from insurance_rag.chunker import chunk_pages
 from insurance_rag.hybrid_retriever import (
     HybridRetriever,
     HybridSearchResult,
     tokenize_for_bm25,
 )
-from insurance_rag.models import DocumentChunk, QueryRewriteResult
+from insurance_rag.models import DocumentChunk, DocumentPage, QueryRewriteResult
 from insurance_rag.retriever import InMemoryVectorIndex
 
 
@@ -43,6 +44,8 @@ class FakeEmbedder:
 
 
 class RuntimeErrorVectorIndex:
+    index_compatibility_key = "chunking:legacy"
+
     def search(self, query_embedding: list[float], top_k: int):
         raise RuntimeError("unexpected vector failure")
 
@@ -96,6 +99,41 @@ def test_hybrid_search_uses_bm25_to_recover_exact_term():
     assert explanation.source_name == "user.pdf"
     assert explanation.final_score == results[0].final_score
     assert explanation.matched_terms == results[0].matched_terms
+
+
+def test_hybrid_search_uses_retrieval_only_clause_context_for_lexical_matching():
+    chunks = chunk_pages(
+        (
+            DocumentPage(
+                1,
+                "第六条 等待期\n等待期为九十日。\n第七条 保险责任\n保障重大疾病。",
+                "text",
+            ),
+        ),
+        source_name="user.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )
+    index = InMemoryVectorIndex.from_embeddings(chunks, [[0.0, 0.0], [0.0, 0.0]])
+    retriever = HybridRetriever(chunks, index, FakeEmbedder([[0.0, 0.0]]))
+
+    results = retriever.search(make_rewrite("Policy Clause"), top_k=1)
+
+    assert results
+    assert {"Policy", "Clause"}.issubset(results[0].matched_terms)
+
+
+def test_hybrid_retriever_rejects_index_without_compatibility_identity():
+    class UnversionedIndex:
+        def search(self, query_embedding: list[float], top_k: int):
+            return []
+
+    chunk = make_chunk("legacy", "等待期为九十日。")
+
+    with pytest.raises(ValueError, match="compatibility identity"):
+        HybridRetriever((chunk,), UnversionedIndex(), FakeEmbedder([[1.0, 0.0]]))
 
 
 def test_hybrid_search_result_explanation_carries_rerank_details():
@@ -176,6 +214,31 @@ def test_vector_mode_embedding_count_mismatch_raises_value_error():
 
     with pytest.raises(ValueError, match="Embedding count"):
         retriever.search(make_rewrite("alpha", "beta"), top_k=2)
+
+
+def test_hybrid_retriever_rejects_index_from_incompatible_chunking_strategy():
+    clause_v2_chunk = DocumentChunk(
+        chunk_id="clause-v2",
+        text="等待期为九十日。",
+        page_number=1,
+        section_title=WAITING_PERIOD,
+        source_type="user_policy",
+        source_name="user.pdf",
+        extraction_method="text",
+        chunking_strategy="clause_v2",
+    )
+    legacy_chunk = make_chunk("legacy", "等待期为九十日。")
+    clause_v2_index = InMemoryVectorIndex.from_embeddings(
+        (clause_v2_chunk,),
+        [[1.0, 0.0]],
+    )
+
+    with pytest.raises(ValueError, match="chunking strategy"):
+        HybridRetriever(
+            (legacy_chunk,),
+            clause_v2_index,
+            FakeEmbedder([[1.0, 0.0]]),
+        )
 
 
 def test_top_k_less_than_one_returns_empty():

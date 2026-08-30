@@ -25,6 +25,10 @@ class OpenAIEmbedder:
 class InMemoryVectorIndex:
     def __init__(self, chunks: tuple[DocumentChunk, ...], matrix: np.ndarray) -> None:
         self.chunks = chunks
+        compatibility_keys = {chunk.index_compatibility_key for chunk in chunks}
+        if len(compatibility_keys) != 1:
+            raise ValueError("Index chunks must use one chunking strategy.")
+        self.index_compatibility_key = next(iter(compatibility_keys))
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         self.matrix = matrix / norms
@@ -68,5 +72,5 @@ def build_index(
 ) -> InMemoryVectorIndex:
     if not chunks:
         raise ValueError("Cannot build vector index without embeddings.")
-    embeddings = embedder.embed_texts([chunk.text for chunk in chunks])
+    embeddings = embedder.embed_texts([chunk.retrieval_text for chunk in chunks])
     return InMemoryVectorIndex.from_embeddings(chunks, embeddings)

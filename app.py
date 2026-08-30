@@ -67,6 +67,7 @@ def build_builtin_background_index(
                 source_type="built_in_dataset",
                 chunk_size=config.chunk_size,
                 overlap=config.chunk_overlap,
+                strategy=config.chunking_strategy,
             )
         )
     if not chunks:
@@ -207,6 +208,7 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
         source_type="user_policy",
         chunk_size=config.chunk_size,
         overlap=config.chunk_overlap,
+        strategy=config.chunking_strategy,
     )
     if not chunks:
         st.session_state.parse_result = parse_result
