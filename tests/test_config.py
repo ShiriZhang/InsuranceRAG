@@ -10,6 +10,8 @@ CONFIG_ENV_VARS = (
     "INSURANCE_RAG_CHUNK_SIZE",
     "INSURANCE_RAG_CHUNK_OVERLAP",
     "INSURANCE_RAG_CHUNKING_STRATEGY",
+    "INSURANCE_RAG_CHUNK_TARGET_CHARS",
+    "INSURANCE_RAG_CHUNK_HARD_MAX_CHARS",
     "INSURANCE_RAG_POLICY_TOP_K",
     "INSURANCE_RAG_BUILTIN_TOP_K",
     "INSURANCE_RAG_MIN_PAGE_TEXT_CHARS",
@@ -85,6 +87,17 @@ def test_config_selects_clause_v2_chunking_strategy(monkeypatch):
     config = AppConfig.from_env()
 
     assert config.chunking_strategy == "clause_v2"
+
+
+def test_config_exposes_clause_v2_soft_target_and_hard_limit(monkeypatch):
+    clear_config_env(monkeypatch)
+    monkeypatch.setenv("INSURANCE_RAG_CHUNK_TARGET_CHARS", "960")
+    monkeypatch.setenv("INSURANCE_RAG_CHUNK_HARD_MAX_CHARS", "1280")
+
+    config = AppConfig.from_env()
+
+    assert config.chunk_target_chars == 960
+    assert config.chunk_hard_max_chars == 1280
 
 
 def test_config_rejects_unknown_chunking_strategy():

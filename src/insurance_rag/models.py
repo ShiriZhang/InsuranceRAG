@@ -80,6 +80,7 @@ class Citation:
     section_title: str
     excerpt: str
     quality_notes: tuple[str, ...] = ()
+    source_spans: tuple[SourceSpan, ...] = ()
 
 
 class GuardStatus(str, Enum):

@@ -36,6 +36,7 @@ def build_citation(chunk: DocumentChunk, max_chars: int = 180) -> Citation:
         section_title=chunk.section_title,
         excerpt=excerpt,
         quality_notes=chunk.quality_notes,
+        source_spans=chunk.source_spans,
     )
 
 

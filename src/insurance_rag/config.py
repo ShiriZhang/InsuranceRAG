@@ -19,6 +19,8 @@ class AppConfig:
     chunk_size: int = 900
     chunk_overlap: int = 150
     chunking_strategy: str = "legacy"
+    chunk_target_chars: int = 900
+    chunk_hard_max_chars: int = 1200
     policy_top_k: int = 6
     builtin_top_k: int = 3
     min_page_text_chars: int = 80
@@ -41,6 +43,12 @@ class AppConfig:
             raise ValueError(
                 f"Unsupported chunking strategy: {self.chunking_strategy!r}"
             )
+        if self.chunk_target_chars <= 0:
+            raise ValueError("chunk_target_chars must be positive")
+        if self.chunk_hard_max_chars < self.chunk_target_chars:
+            raise ValueError(
+                "chunk_hard_max_chars must be at least chunk_target_chars"
+            )
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -54,6 +62,12 @@ class AppConfig:
             chunk_size=int(os.getenv("INSURANCE_RAG_CHUNK_SIZE", "900")),
             chunk_overlap=int(os.getenv("INSURANCE_RAG_CHUNK_OVERLAP", "150")),
             chunking_strategy=os.getenv("INSURANCE_RAG_CHUNKING_STRATEGY", "legacy"),
+            chunk_target_chars=int(
+                os.getenv("INSURANCE_RAG_CHUNK_TARGET_CHARS", "900")
+            ),
+            chunk_hard_max_chars=int(
+                os.getenv("INSURANCE_RAG_CHUNK_HARD_MAX_CHARS", "1200")
+            ),
             policy_top_k=int(os.getenv("INSURANCE_RAG_POLICY_TOP_K", "6")),
             builtin_top_k=int(os.getenv("INSURANCE_RAG_BUILTIN_TOP_K", "3")),
             min_page_text_chars=int(os.getenv("INSURANCE_RAG_MIN_PAGE_TEXT_CHARS", "80")),

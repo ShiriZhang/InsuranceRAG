@@ -101,3 +101,42 @@ def test_build_index_embeds_retrieval_context_with_authoritative_source_text():
     build_index((chunk,), embedder)
 
     assert embedder.calls == [[chunk.retrieval_text]]
+
+
+def test_clause_v2_representative_policy_builds_production_equivalent_index():
+    class FakeEmbedder:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            return [[1.0, float(index + 1)] for index, _ in enumerate(texts)]
+
+    pages = (
+        DocumentPage(1, "投保前请仔细阅读。", "text"),
+        DocumentPage(2, "第六条 等待期\n等待期自合同生效日起计算。", "text"),
+        DocumentPage(3, "等待期为九十日。", "text"),
+        DocumentPage(
+            4,
+            "第七条 保险责任\n"
+            "本合同对一次事故造成的全部损失按照约定比例承担保险责任且不超过保险金额。",
+            "text",
+        ),
+    )
+    chunks = chunk_pages(
+        pages,
+        source_name="policy.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+        target_chars=16,
+        hard_max_chars=24,
+    )
+    embedder = FakeEmbedder()
+
+    index = build_index(chunks, embedder)
+
+    assert index.chunks == chunks
+    assert embedder.calls == [[chunk.retrieval_text for chunk in chunks]]
+    assert all(chunk.index_compatibility_key == "chunking:clause_v2" for chunk in chunks)

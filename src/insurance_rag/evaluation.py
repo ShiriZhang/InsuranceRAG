@@ -426,6 +426,8 @@ def _evaluate_local_documents(
                 chunk_size=eval_config.chunk_size,
                 overlap=eval_config.chunk_overlap,
                 strategy=eval_config.chunking_strategy,
+                target_chars=eval_config.chunk_target_chars,
+                hard_max_chars=eval_config.chunk_hard_max_chars,
             )
         except Exception as exc:
             parse_errors.append(f"{pdf.name}: {type(exc).__name__}: {exc}")

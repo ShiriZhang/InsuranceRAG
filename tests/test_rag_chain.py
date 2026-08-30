@@ -154,6 +154,27 @@ def test_build_citation_prefers_authoritative_source_spans():
     assert citation.excerpt == "第六条 等待期 等待期为九十日。"
 
 
+def test_build_citation_exposes_each_cross_page_source_span():
+    pages = (
+        DocumentPage(4, "第六条 等待期\n等待期自合同生效日起计算。", "text"),
+        DocumentPage(5, "等待期为九十日。", "text"),
+    )
+    chunk = chunk_pages(
+        pages,
+        source_name="user.pdf",
+        source_type="user_policy",
+        chunk_size=900,
+        overlap=0,
+        strategy="clause_v2",
+    )[0]
+
+    citation = build_citation(chunk)
+
+    assert citation.source_spans == chunk.source_spans
+    assert [span.page_number for span in citation.source_spans] == [4, 5]
+    assert citation.excerpt == "第六条 等待期 等待期自合同生效日起计算。 等待期为九十日。"
+
+
 def test_build_messages_excludes_retrieval_only_heading_context():
     chunk = chunk_pages(
         (DocumentPage(4, "第六条 等待期\n等待期为九十日。", "text"),),

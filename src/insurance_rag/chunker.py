@@ -1,3 +1,4 @@
+from dataclasses import replace
 import re
 
 from insurance_rag.clause_parser import (
@@ -158,6 +159,151 @@ def _rejected_page_edge_medium_offsets(
     return rejected
 
 
+def _unsafe_page_gap_diagnostic(page: DocumentPage) -> str | None:
+    if not page.text.strip():
+        return "page_gap:empty"
+    if "unreadable_page" in page.quality_notes:
+        return "page_gap:unreadable"
+    if "severe_ocr_uncertainty" in page.quality_notes:
+        return "page_gap:severe_ocr_uncertainty"
+    return None
+
+
+def _split_source_span_at_semantic_boundaries(span: SourceSpan) -> list[SourceSpan]:
+    boundaries = {0, len(span.text)}
+    boundaries.update(
+        match.end()
+        for match in re.finditer(r"[。！？!?；;][ \t]*(?:\r?\n)?", span.text)
+    )
+    boundaries.update(
+        match.start()
+        for match in re.finditer(
+            r"(?m)^(?:[（(]?[零〇一二三四五六七八九十百千万两\d]+[）).、．])\s*",
+            span.text,
+        )
+        if match.start() > 0
+    )
+
+    offsets = sorted(boundaries)
+    return [
+        SourceSpan(
+            page_number=span.page_number,
+            text=span.text[start:end],
+            start_char=span.start_char + start,
+            end_char=span.start_char + end,
+        )
+        for start, end in zip(offsets, offsets[1:])
+        if end > start
+    ]
+
+
+def _coalesce_contiguous_spans(spans: list[SourceSpan]) -> tuple[SourceSpan, ...]:
+    coalesced: list[SourceSpan] = []
+    for span in spans:
+        if (
+            coalesced
+            and coalesced[-1].page_number == span.page_number
+            and coalesced[-1].end_char == span.start_char
+        ):
+            previous = coalesced[-1]
+            coalesced[-1] = SourceSpan(
+                page_number=previous.page_number,
+                text=previous.text + span.text,
+                start_char=previous.start_char,
+                end_char=span.end_char,
+            )
+        else:
+            coalesced.append(span)
+    return tuple(coalesced)
+
+
+def _spans_text(spans: tuple[SourceSpan, ...] | list[SourceSpan]) -> str:
+    return "\n".join(span.text for span in _coalesce_contiguous_spans(list(spans)))
+
+
+def _split_clause_v2_chunk(
+    chunk: DocumentChunk,
+    *,
+    target_chars: int,
+    hard_max_chars: int,
+) -> list[DocumentChunk]:
+    semantic_units: list[tuple[list[SourceSpan], bool]] = []
+    for source_span in chunk.source_spans:
+        for semantic_span in _split_source_span_at_semantic_boundaries(source_span):
+            if len(semantic_span.text) <= hard_max_chars:
+                semantic_units.append(([semantic_span], False))
+                continue
+            for offset in range(0, len(semantic_span.text), hard_max_chars):
+                window_text = semantic_span.text[offset : offset + hard_max_chars]
+                semantic_units.append(
+                    (
+                        [
+                            SourceSpan(
+                                page_number=semantic_span.page_number,
+                                text=window_text,
+                                start_char=semantic_span.start_char + offset,
+                                end_char=semantic_span.start_char
+                                + offset
+                                + len(window_text),
+                            )
+                        ],
+                        True,
+                    )
+                )
+
+    packed: list[tuple[list[SourceSpan], bool]] = []
+    current_spans: list[SourceSpan] = []
+    current_uses_window = False
+    for unit_spans, uses_window in semantic_units:
+        candidate_spans = current_spans + unit_spans
+        candidate_length = len(_spans_text(candidate_spans))
+        if current_spans and candidate_length > target_chars:
+            current_length = len(_spans_text(current_spans))
+            current_is_bare_heading = (
+                chunk.heading_text is not None
+                and _spans_text(current_spans).strip() == chunk.heading_text.strip()
+            )
+            candidate_is_closer = (
+                candidate_length <= hard_max_chars
+                and (
+                    current_is_bare_heading
+                    or candidate_length - target_chars
+                    < target_chars - current_length
+                )
+            )
+            if candidate_is_closer:
+                current_spans = candidate_spans
+                current_uses_window = current_uses_window or uses_window
+            else:
+                packed.append((current_spans, current_uses_window))
+                current_spans = list(unit_spans)
+                current_uses_window = uses_window
+        else:
+            current_spans = candidate_spans
+            current_uses_window = current_uses_window or uses_window
+    if current_spans:
+        packed.append((current_spans, current_uses_window))
+
+    split_chunks: list[DocumentChunk] = []
+    for spans, uses_window in packed:
+        coalesced_spans = _coalesce_contiguous_spans(spans)
+        diagnostics = chunk.boundary_diagnostics
+        if uses_window:
+            diagnostics = tuple(
+                dict.fromkeys(diagnostics + ("character_window_fallback",))
+            )
+        split_chunks.append(
+            replace(
+                chunk,
+                text=_spans_text(coalesced_spans),
+                page_number=coalesced_spans[0].page_number,
+                source_spans=coalesced_spans,
+                boundary_diagnostics=diagnostics,
+            )
+        )
+    return split_chunks
+
+
 def chunk_pages(
     pages: tuple[DocumentPage, ...],
     source_name: str,
@@ -165,18 +311,38 @@ def chunk_pages(
     chunk_size: int,
     overlap: int,
     strategy: str = "legacy",
+    target_chars: int | None = None,
+    hard_max_chars: int | None = None,
 ) -> tuple[DocumentChunk, ...]:
     if strategy not in CHUNKING_STRATEGIES:
         raise ValueError(f"Unsupported chunking strategy: {strategy!r}")
 
+    if strategy == "clause_v2":
+        target_chars = chunk_size if target_chars is None else target_chars
+        hard_max_chars = chunk_size if hard_max_chars is None else hard_max_chars
+        if target_chars <= 0:
+            raise ValueError("target_chars must be positive")
+        if hard_max_chars < target_chars:
+            raise ValueError("hard_max_chars must be at least target_chars")
+
     chunks: list[DocumentChunk] = []
     current_title = UNKNOWN_SECTION_TITLE
+    active_clause_chunk_index: int | None = None
+    pending_gap_diagnostics: tuple[str, ...] = ()
     rejected_offsets_by_page = (
         _rejected_page_edge_medium_offsets(pages)
         if strategy == "clause_v2"
         else {}
     )
     for page_index, page in enumerate(pages):
+        gap_diagnostic = (
+            _unsafe_page_gap_diagnostic(page) if strategy == "clause_v2" else None
+        )
+        if gap_diagnostic is not None:
+            active_clause_chunk_index = None
+            current_title = UNKNOWN_SECTION_TITLE
+            pending_gap_diagnostics = (gap_diagnostic,)
+            continue
         if not page.text:
             continue
         rejected_heading_offsets = rejected_offsets_by_page.get(page_index, set())
@@ -194,6 +360,14 @@ def chunk_pages(
                     overlap=overlap,
                 )
             ]
+        trusted_heading_starts = [
+            source_start
+            for part, source_start, _ in parts
+            if parse_clause_metadata(part).heading_confidence in {"high", "medium"}
+            and source_start not in rejected_heading_offsets
+            and source_start is not None
+        ]
+        first_trusted_heading_start = min(trusted_heading_starts, default=None)
         for part, source_start, source_end in parts:
             metadata = parse_clause_metadata(part, current_title=current_title)
             rejected_in_part = (
@@ -225,40 +399,97 @@ def chunk_pages(
                     boundary_diagnostics += ("low_confidence_heading_candidate",)
                 if rejected_in_part:
                     boundary_diagnostics += ("rejected_page_header_footer",)
+                boundary_diagnostics += pending_gap_diagnostics
             strategy_id = "" if strategy == "legacy" else f":{strategy}"
             chunk_id = (
                 f"{source_type}:{source_name}{strategy_id}:"
                 f"p{page.page_number}:c{len(chunks) + 1}"
             )
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=chunk_id,
-                    text=part,
-                    page_number=page.page_number,
-                    section_title=metadata.section_title,
-                    source_type=source_type,
-                    source_name=source_name,
-                    extraction_method=page.extraction_method,
-                    quality_notes=page.quality_notes,
-                    clause_id=metadata.clause_id,
-                    heading_text=metadata.heading_text,
-                    heading_confidence=metadata.heading_confidence,
-                    heading_source=metadata.heading_source,
-                    retrieval_context=retrieval_context,
-                    source_spans=(
-                        (
-                            SourceSpan(
-                                page_number=page.page_number,
-                                text=part,
-                                start_char=source_start,
-                                end_char=source_end,
-                            ),
-                        )
-                        if source_start is not None and source_end is not None
-                        else ()
-                    ),
-                    boundary_diagnostics=boundary_diagnostics,
-                    chunking_strategy=strategy,
-                )
+            chunk = DocumentChunk(
+                chunk_id=chunk_id,
+                text=part,
+                page_number=page.page_number,
+                section_title=metadata.section_title,
+                source_type=source_type,
+                source_name=source_name,
+                extraction_method=page.extraction_method,
+                quality_notes=page.quality_notes,
+                clause_id=metadata.clause_id,
+                heading_text=metadata.heading_text,
+                heading_confidence=metadata.heading_confidence,
+                heading_source=metadata.heading_source,
+                retrieval_context=retrieval_context,
+                source_spans=(
+                    (
+                        SourceSpan(
+                            page_number=page.page_number,
+                            text=part,
+                            start_char=source_start,
+                            end_char=source_end,
+                        ),
+                    )
+                    if source_start is not None and source_end is not None
+                    else ()
+                ),
+                boundary_diagnostics=boundary_diagnostics,
+                chunking_strategy=strategy,
             )
-    return tuple(chunks)
+            if (
+                strategy == "clause_v2"
+                and metadata.heading_confidence == "low"
+                and not rejected_in_part
+                and (
+                    first_trusted_heading_start is None
+                    or (
+                        source_end is not None
+                        and source_end <= first_trusted_heading_start
+                    )
+                )
+                and active_clause_chunk_index is not None
+            ):
+                active_chunk = chunks[active_clause_chunk_index]
+                chunks[active_clause_chunk_index] = replace(
+                    active_chunk,
+                    text=f"{active_chunk.text}\n{chunk.text}",
+                    quality_notes=tuple(
+                        dict.fromkeys(active_chunk.quality_notes + chunk.quality_notes)
+                    ),
+                    source_spans=active_chunk.source_spans + chunk.source_spans,
+                    boundary_diagnostics=tuple(
+                        dict.fromkeys(
+                            active_chunk.boundary_diagnostics
+                            + ("cross_page_clause_continuation",)
+                        )
+                    ),
+                )
+                continue
+
+            chunks.append(chunk)
+            if strategy == "clause_v2" and metadata.heading_confidence in {
+                "high",
+                "medium",
+            }:
+                active_clause_chunk_index = len(chunks) - 1
+            pending_gap_diagnostics = ()
+    if strategy != "clause_v2":
+        return tuple(chunks)
+
+    split_chunks = [
+        split_chunk
+        for chunk in chunks
+        for split_chunk in _split_clause_v2_chunk(
+            chunk,
+            target_chars=target_chars,
+            hard_max_chars=hard_max_chars,
+        )
+    ]
+    return tuple(
+        replace(
+            chunk,
+            chunk_id=(
+                f"{source_type}:{source_name}:clause_v2:"
+                f"p{chunk.page_number}:c{index}"
+            ),
+        )
+        for index, chunk in enumerate(split_chunks, start=1)
+    )

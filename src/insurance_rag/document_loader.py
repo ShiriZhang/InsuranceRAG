@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import fitz
@@ -86,14 +86,22 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                             "已保留原始文本提取结果。"
                         )
                         warning_keys.add(warning_key)
-            pages.append(
-                normalize_page_text(
-                    PageExtraction(
-                        page_number=index,
-                        text=raw_text,
-                        extraction_method=method,
-                    )
+            normalized_page = normalize_page_text(
+                PageExtraction(
+                    page_number=index,
+                    text=raw_text,
+                    extraction_method=method,
                 )
             )
+            if (
+                method == "ocr"
+                and garbled_ratio(normalized_page.text) > config.max_garbled_ratio
+            ):
+                normalized_page = replace(
+                    normalized_page,
+                    quality_notes=normalized_page.quality_notes
+                    + ("severe_ocr_uncertainty",),
+                )
+            pages.append(normalized_page)
 
     return ParseResult(filename=Path(filename).name, pages=tuple(pages), warnings=tuple(warnings))

@@ -68,6 +68,8 @@ def build_builtin_background_index(
                 chunk_size=config.chunk_size,
                 overlap=config.chunk_overlap,
                 strategy=config.chunking_strategy,
+                target_chars=config.chunk_target_chars,
+                hard_max_chars=config.chunk_hard_max_chars,
             )
         )
     if not chunks:
@@ -209,6 +211,8 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
         chunk_size=config.chunk_size,
         overlap=config.chunk_overlap,
         strategy=config.chunking_strategy,
+        target_chars=config.chunk_target_chars,
+        hard_max_chars=config.chunk_hard_max_chars,
     )
     if not chunks:
         st.session_state.parse_result = parse_result
