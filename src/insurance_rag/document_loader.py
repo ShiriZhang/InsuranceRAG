@@ -1,10 +1,15 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import fitz
 
 from insurance_rag.config import AppConfig
-from insurance_rag.models import DocumentPage, ParseResult
+from insurance_rag.models import (
+    DocumentPage,
+    PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,
+    PAGE_QUALITY_UNREADABLE,
+    ParseResult,
+)
 
 
 @dataclass(frozen=True)
@@ -86,14 +91,33 @@ def parse_pdf_bytes(pdf_bytes: bytes, filename: str, config: AppConfig) -> Parse
                             "已保留原始文本提取结果。"
                         )
                         warning_keys.add(warning_key)
-            pages.append(
-                normalize_page_text(
-                    PageExtraction(
-                        page_number=index,
-                        text=raw_text,
-                        extraction_method=method,
-                    )
+            normalized_page = normalize_page_text(
+                PageExtraction(
+                    page_number=index,
+                    text=raw_text,
+                    extraction_method=method,
                 )
             )
+            final_text_is_severely_garbled = (
+                garbled_ratio(normalized_page.text) > config.max_garbled_ratio
+            )
+            if method == "ocr" and final_text_is_severely_garbled:
+                normalized_page = replace(
+                    normalized_page,
+                    quality_notes=normalized_page.quality_notes
+                    + (PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY,),
+                )
+            elif final_text_is_severely_garbled:
+                normalized_page = replace(
+                    normalized_page,
+                    quality_notes=normalized_page.quality_notes
+                    + (PAGE_QUALITY_UNREADABLE,),
+                )
+            pages.append(normalized_page)
 
-    return ParseResult(filename=Path(filename).name, pages=tuple(pages), warnings=tuple(warnings))
+    portable_filename = Path(filename.replace("\\", "/")).name
+    return ParseResult(
+        filename=portable_filename,
+        pages=tuple(pages),
+        warnings=tuple(warnings),
+    )

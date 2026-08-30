@@ -16,7 +16,7 @@ from insurance_rag.builtin_dataset import (
 from insurance_rag.config import AppConfig
 from insurance_rag.document_loader import parse_pdf_bytes
 from insurance_rag.hybrid_retriever import HybridRetriever
-from insurance_rag.models import AnswerPayload, RetrievalExplanation
+from insurance_rag.models import AnswerPayload, Citation, RetrievalExplanation
 from insurance_rag.rag_chain import RagChain, should_use_builtin_context
 from insurance_rag.retriever import OpenAIEmbedder, build_index
 
@@ -68,6 +68,8 @@ def build_builtin_background_index(
                 chunk_size=config.chunk_size,
                 overlap=config.chunk_overlap,
                 strategy=config.chunking_strategy,
+                target_chars=config.chunk_target_chars,
+                hard_max_chars=config.chunk_hard_max_chars,
             )
         )
     if not chunks:
@@ -169,7 +171,7 @@ def render_citations(payload: AnswerPayload) -> None:
     if payload.policy_citations:
         with st.expander("用户保单引用", expanded=True):
             for citation in payload.policy_citations:
-                page = f"第 {citation.page_number} 页" if citation.page_number else "页码未知"
+                page = _format_citation_pages(citation)
                 st.markdown(f"**{page}｜{citation.section_title}**")
                 st.write(citation.excerpt)
                 for note in citation.quality_notes:
@@ -177,11 +179,18 @@ def render_citations(payload: AnswerPayload) -> None:
     if payload.builtin_citations:
         with st.expander("内置资料库引用", expanded=False):
             for citation in payload.builtin_citations:
-                page = f"第 {citation.page_number} 页" if citation.page_number else "页码未知"
+                page = _format_citation_pages(citation)
                 st.markdown(f"**{citation.source_name}｜{page}｜{citation.section_title}**")
                 st.write(citation.excerpt)
     render_citation_verification(payload)
     render_retrieval_details(payload.retrieval_explanations)
+
+
+def _format_citation_pages(citation: Citation) -> str:
+    if not citation.page_numbers:
+        return "页码未知"
+    pages = "、".join(str(page_number) for page_number in citation.page_numbers)
+    return f"第 {pages} 页"
 
 
 def process_upload(uploaded_file, config: AppConfig) -> None:
@@ -209,6 +218,8 @@ def process_upload(uploaded_file, config: AppConfig) -> None:
         chunk_size=config.chunk_size,
         overlap=config.chunk_overlap,
         strategy=config.chunking_strategy,
+        target_chars=config.chunk_target_chars,
+        hard_max_chars=config.chunk_hard_max_chars,
     )
     if not chunks:
         st.session_state.parse_result = parse_result
