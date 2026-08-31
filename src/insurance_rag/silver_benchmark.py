@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
@@ -16,6 +17,7 @@ from insurance_rag.models import DocumentChunk, DocumentPage
 from insurance_rag.query_rewriter import rewrite_query
 from insurance_rag.retriever import InMemoryVectorIndex
 from insurance_rag.rule_reranker import rerank_results
+from insurance_rag.silver_normalization import normalized_source_text
 
 
 class SourceApproval(str, Enum):
@@ -33,6 +35,13 @@ APPROVED_SOURCE_TYPES = frozenset(
 JUDGE_ID = "exact-span-v1"
 QUERY_REWRITE_VERSION = "production-v1"
 RERANKER_VERSION = "rules-v1"
+
+
+def _combine_unique_strata(
+    stratum: str,
+    additional_strata: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((stratum, *additional_strata)))
 
 
 class Embedder(Protocol):
@@ -83,6 +92,20 @@ class AnnotationMetadata:
 
 
 @dataclass(frozen=True)
+class AnnotationResponseMetadata:
+    response_id: str
+    system_fingerprint: str | None
+    request_timestamp: str
+    retry_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    draft_order: tuple[str, ...] = ()
+    returned_model: str | None = None
+    response_status: str | None = None
+    incomplete_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class AnnotationDraft:
     question: str
     evidence_spans: tuple[EvidenceSpan, ...]
@@ -91,6 +114,13 @@ class AnnotationDraft:
     metadata: AnnotationMetadata
     hard_negative_spans: tuple[EvidenceSpan, ...] = ()
     annotation_uncertain: bool = False
+    additional_strata: tuple[str, ...] = ()
+    response_metadata: AnnotationResponseMetadata | None = None
+    slot_id: str = ""
+
+    @property
+    def strata(self) -> tuple[str, ...]:
+        return _combine_unique_strata(self.stratum, self.additional_strata)
 
 
 @dataclass(frozen=True)
@@ -107,6 +137,13 @@ class SilverCase:
     adjudicated: bool
     annotation_outcome: str
     annotation_metadata: tuple[AnnotationMetadata, ...]
+    additional_strata: tuple[str, ...] = ()
+    annotation_response_metadata: tuple[AnnotationResponseMetadata, ...] = ()
+    annotation_slot_id: str = ""
+
+    @property
+    def strata(self) -> tuple[str, ...]:
+        return _combine_unique_strata(self.stratum, self.additional_strata)
 
 
 @dataclass(frozen=True)
@@ -149,7 +186,7 @@ class FrozenBenchmark:
         source_records = []
         for source in self.sources:
             source_text = _source_text(source.pages)
-            normalized_text = _normalized_source_text(source.pages)
+            normalized_text = normalized_source_text(source.pages)
             source_records.append(
                 {
                     "source_id": source.source_id,
@@ -184,6 +221,7 @@ class FrozenBenchmark:
                     "question": case.question,
                     "evidence_spans": [asdict(span) for span in case.evidence_spans],
                     "stratum": case.stratum,
+                    "strata": list(case.strata),
                     "hard_negative_category": case.hard_negative_category,
                     "hard_negative_spans": [
                         asdict(span) for span in case.hard_negative_spans
@@ -192,6 +230,11 @@ class FrozenBenchmark:
                     "initial_disagreement": case.initial_disagreement,
                     "adjudicated": case.adjudicated,
                     "annotation_outcome": case.annotation_outcome,
+                    "annotation_slot_id": case.annotation_slot_id,
+                    "annotation_responses": [
+                        asdict(response)
+                        for response in case.annotation_response_metadata
+                    ],
                 }
                 for case in self.cases
             ],
@@ -310,12 +353,16 @@ def generate_frozen_benchmark(
     second_pass: AnnotationPass,
     adjudication_pass: AdjudicationPass,
     config: BenchmarkConfig,
+    max_workers: int = 1,
 ) -> FrozenBenchmark:
+    if max_workers <= 0:
+        raise ValueError("max_workers must be positive.")
     annotation_pairs: dict[
         str, tuple[tuple[AnnotationDraft, AnnotationDraft], ...]
     ] = {}
     adjudications: dict[tuple[str, int], AnnotationDraft] = {}
-    for source in sources:
+
+    def process_source(source: BenchmarkSource):
         _validate_approved_source(source)
         first_annotations = first_pass(source)
         second_annotations = second_pass(source)
@@ -324,12 +371,34 @@ def generate_frozen_benchmark(
                 "Independent annotation passes must return the same number of cases."
             )
         pairs = tuple(zip(first_annotations, second_annotations))
-        annotation_pairs[source.source_id] = pairs
+        source_adjudications = []
         for case_index, (first, second) in enumerate(pairs):
-            if _annotation_label(first) != _annotation_label(second):
-                adjudications[(source.source_id, case_index)] = adjudication_pass(
-                    source, first, second
+            if (
+                first.annotation_uncertain
+                or second.annotation_uncertain
+                or _annotation_label(first) != _annotation_label(second)
+            ):
+                source_adjudications.append(
+                    (
+                        case_index,
+                        adjudication_pass(source, first, second),
+                    )
                 )
+        return source.source_id, pairs, tuple(source_adjudications)
+
+    if max_workers == 1:
+        results = map(process_source, sources)
+        for source_id, pairs, source_adjudications in results:
+            annotation_pairs[source_id] = pairs
+            for case_index, adjudication in source_adjudications:
+                adjudications[(source_id, case_index)] = adjudication
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(process_source, sources)
+            for source_id, pairs, source_adjudications in results:
+                annotation_pairs[source_id] = pairs
+                for case_index, adjudication in source_adjudications:
+                    adjudications[(source_id, case_index)] = adjudication
     return build_frozen_benchmark(
         sources=sources,
         annotation_pairs=annotation_pairs,
@@ -351,8 +420,17 @@ def adjudicate_annotations(
     if first.metadata.annotator_id == second.metadata.annotator_id:
         raise ValueError("Two independent annotations require different annotator IDs.")
 
-    agreed = _annotation_label(first) == _annotation_label(second)
+    agreed = (
+        not first.annotation_uncertain
+        and not second.annotation_uncertain
+        and _annotation_label(first) == _annotation_label(second)
+    )
     metadata = [first.metadata, second.metadata]
+    response_metadata = [
+        response
+        for response in (first.response_metadata, second.response_metadata)
+        if response is not None
+    ]
     if agreed:
         selected = first
         outcome = "agreed"
@@ -368,6 +446,8 @@ def adjudicate_annotations(
         _validate_annotation(source, adjudication)
         selected = adjudication
         metadata.append(adjudication.metadata)
+        if adjudication.response_metadata is not None:
+            response_metadata.append(adjudication.response_metadata)
         outcome = "annotation_uncertain" if adjudication.annotation_uncertain else "adjudicated"
         adjudicated = True
 
@@ -381,6 +461,11 @@ def adjudicate_annotations(
             "source_id": source.source_id,
             "question": selected.question,
             "spans": [asdict(span) for span in selected.evidence_spans],
+            "strata": selected.strata,
+            "hard_negative_category": selected.hard_negative_category,
+            "hard_negative_spans": [
+                asdict(span) for span in selected.hard_negative_spans
+            ],
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -398,6 +483,9 @@ def adjudicate_annotations(
         adjudicated=adjudicated,
         annotation_outcome=outcome,
         annotation_metadata=tuple(metadata),
+        additional_strata=selected.additional_strata,
+        annotation_response_metadata=tuple(response_metadata),
+        annotation_slot_id=selected.slot_id,
     )
 
 
@@ -771,6 +859,7 @@ def _validate_scored_case(source: BenchmarkSource, case: SilverCase) -> None:
         raise ValueError(
             "Hard-negative categories require exact hard-negative spans and vice versa."
         )
+    _validate_strata(case.stratum, case.additional_strata)
 
 
 def _validate_span(
@@ -808,6 +897,7 @@ def _validate_annotation(source: BenchmarkSource, annotation: AnnotationDraft) -
         raise ValueError(
             "Hard-negative categories require exact hard-negative spans and vice versa."
         )
+    _validate_strata(annotation.stratum, annotation.additional_strata)
 
 
 def _annotation_label(annotation: AnnotationDraft) -> tuple[object, ...]:
@@ -818,7 +908,16 @@ def _annotation_label(annotation: AnnotationDraft) -> tuple[object, ...]:
         annotation.hard_negative_category,
         annotation.hard_negative_spans,
         annotation.annotation_uncertain,
+        annotation.additional_strata,
     )
+
+
+def _validate_strata(stratum: str, additional_strata: tuple[str, ...]) -> None:
+    strata = (stratum, *additional_strata)
+    if any(not item.strip() for item in strata):
+        raise ValueError("Silver cases require non-empty strata identifiers.")
+    if len(set(strata)) != len(strata):
+        raise ValueError("Silver case strata identifiers must be unique.")
 
 
 def _covers_all_spans(
@@ -955,12 +1054,6 @@ def _paired_confidence_interval(
 def _source_text(pages: tuple[DocumentPage, ...]) -> str:
     return "\n\f\n".join(
         f"page:{page.page_number}\n{page.text}" for page in pages
-    )
-
-
-def _normalized_source_text(pages: tuple[DocumentPage, ...]) -> str:
-    return "\n\f\n".join(
-        f"page:{page.page_number}\n{' '.join(page.text.split())}" for page in pages
     )
 
 

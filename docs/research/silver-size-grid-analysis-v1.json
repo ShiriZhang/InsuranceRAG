@@ -1,0 +1,19 @@
+{
+  "analysis_version": "silver-size-grid-analysis/v1.0.0",
+  "approximate_policy_clauses": {
+    "count": 2138,
+    "over_threshold": {"1200": 544, "1600": 471, "900": 646},
+    "percentiles": {"50": 229, "75": 1239, "90": 4348, "95": 12044, "99": 39319}
+  },
+  "clause_recognizer": "insurance_rag.clause_parser.parse_clause_metadata",
+  "document_split_manifest_sha256": "5925f24e45bdbb817f95bc573da73a0d0f3482bbf85506d5202f3b4a38f71b65",
+  "selected_size_grid": [[600, 900], [900, 1200], [1200, 1600]],
+  "semantic_unit_rule": "split-after-Chinese-terminal-punctuation/v1",
+  "semantic_units": {
+    "count": 86099,
+    "over_threshold": {"1200": 46, "1600": 25, "900": 93},
+    "percentiles": {"50": 42, "75": 66, "90": 98, "95": 129, "99": 260}
+  },
+  "source_count": 123,
+  "split": "development"
+}

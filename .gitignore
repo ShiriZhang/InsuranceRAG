@@ -5,6 +5,7 @@ eval_reports/
 .rag_eval_cache/
 silver_benchmark_data/
 silver_labels/
+silver_dataset_manifests/
 
 __pycache__/
 *.py[cod]
