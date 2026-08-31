@@ -380,11 +380,10 @@ def test_clause_v2_semantic_overlap_never_exceeds_hard_max_chars():
     )
 
     assert all(len(chunk.retrieval_text) <= 55 for chunk in chunks)
+    assert all(chunk.body_overlap_context for chunk in chunks[1:])
     assert all(
-        chunk.body_overlap_context
-        or "semantic_overlap_unavailable" in chunk.boundary_diagnostics
-        or index == 0
-        for index, chunk in enumerate(chunks)
+        "semantic_overlap_unavailable" not in chunk.boundary_diagnostics
+        for chunk in chunks
     )
 
 

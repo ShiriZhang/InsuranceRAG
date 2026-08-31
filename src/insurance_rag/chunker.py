@@ -308,10 +308,12 @@ def _split_clause_v2_chunk(
                     )
                 )
 
-    packed: list[tuple[list[SourceSpan], bool, str]] = []
+    packed: list[tuple[list[SourceSpan], bool, str, str, bool]] = []
     current_spans: list[SourceSpan] = []
     current_uses_window = False
     current_last_semantic_unit = ""
+    current_overlap_context = ""
+    current_overlap_unavailable = False
     for unit_spans, uses_window in semantic_units:
         unit_text = _body_semantic_unit_text(
             _spans_text(unit_spans).strip(),
@@ -319,18 +321,25 @@ def _split_clause_v2_chunk(
         )
         candidate_spans = current_spans + unit_spans
         candidate_length = len(_spans_text(candidate_spans).strip())
-        if current_spans and candidate_length > body_target_chars:
+        overlap_prefix_chars = (
+            len(current_overlap_context) + 1 if current_overlap_context else 0
+        )
+        current_body_target_chars = max(
+            1, body_target_chars - overlap_prefix_chars
+        )
+        current_body_hard_max_chars = body_hard_max_chars - overlap_prefix_chars
+        if current_spans and candidate_length > current_body_target_chars:
             current_length = len(_spans_text(current_spans).strip())
             current_is_bare_heading = (
                 chunk.heading_text is not None
                 and _spans_text(current_spans).strip() == chunk.heading_text.strip()
             )
             candidate_is_closer = (
-                candidate_length <= body_hard_max_chars
+                candidate_length <= current_body_hard_max_chars
                 and (
                     current_is_bare_heading
-                    or candidate_length - body_target_chars
-                    < body_target_chars - current_length
+                    or candidate_length - current_body_target_chars
+                    < current_body_target_chars - current_length
                 )
             )
             if candidate_is_closer:
@@ -343,75 +352,75 @@ def _split_clause_v2_chunk(
                         current_spans,
                         current_uses_window,
                         current_last_semantic_unit,
+                        current_overlap_context,
+                        current_overlap_unavailable,
                     )
                 )
+                preceding_semantic_unit = current_last_semantic_unit
                 current_spans = list(unit_spans)
                 current_uses_window = uses_window
                 current_last_semantic_unit = unit_text
+                current_overlap_context = (
+                    preceding_semantic_unit
+                    if body_overlap_mode == "preceding_semantic_unit"
+                    else ""
+                )
+                current_overlap_unavailable = bool(
+                    current_overlap_context
+                    and retrieval_prefix_chars
+                    + len(current_overlap_context)
+                    + 1
+                    + len(_spans_text(current_spans).strip())
+                    > hard_max_chars
+                )
+                if current_overlap_unavailable:
+                    current_overlap_context = ""
         else:
             current_spans = candidate_spans
             current_uses_window = current_uses_window or uses_window
             current_last_semantic_unit = unit_text
     if current_spans:
         packed.append(
-            (current_spans, current_uses_window, current_last_semantic_unit)
+            (
+                current_spans,
+                current_uses_window,
+                current_last_semantic_unit,
+                current_overlap_context,
+                current_overlap_unavailable,
+            )
         )
 
     split_chunks: list[DocumentChunk] = []
-    preceding_semantic_unit = ""
-    for chunk_index, (spans, uses_window, last_semantic_unit) in enumerate(packed):
+    for (
+        spans,
+        uses_window,
+        _last_semantic_unit,
+        overlap_context,
+        overlap_unavailable,
+    ) in packed:
         coalesced_spans = _coalesce_contiguous_spans(spans)
         diagnostics = chunk.boundary_diagnostics
         if uses_window or context_uses_window:
             diagnostics = tuple(
                 dict.fromkeys(diagnostics + (BOUNDARY_CHARACTER_WINDOW_FALLBACK,))
             )
+        if overlap_unavailable:
+            diagnostics = tuple(
+                dict.fromkeys(
+                    diagnostics + (BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE,)
+                )
+            )
         split_chunk = replace(
             chunk,
             text=_spans_text(coalesced_spans).strip(),
             page_number=coalesced_spans[0].page_number,
             source_spans=coalesced_spans,
-            body_overlap_context=(
-                preceding_semantic_unit
-                if body_overlap_mode == "preceding_semantic_unit"
-                and chunk_index > 0
-                else ""
-            ),
+            body_overlap_context=overlap_context,
             boundary_diagnostics=diagnostics,
         )
         if len(split_chunk.retrieval_text) > hard_max_chars:
-            if split_chunks:
-                previous = split_chunks[-1]
-                merged_spans = _coalesce_contiguous_spans(
-                    list(previous.source_spans + split_chunk.source_spans)
-                )
-                merged = replace(
-                    previous,
-                    text=_spans_text(merged_spans).strip(),
-                    source_spans=merged_spans,
-                    boundary_diagnostics=tuple(
-                        dict.fromkeys(
-                            previous.boundary_diagnostics
-                            + split_chunk.boundary_diagnostics
-                        )
-                    ),
-                )
-                if len(merged.retrieval_text) <= hard_max_chars:
-                    split_chunks[-1] = merged
-                    preceding_semantic_unit = last_semantic_unit
-                    continue
-            split_chunk = replace(
-                split_chunk,
-                body_overlap_context="",
-                boundary_diagnostics=tuple(
-                    dict.fromkeys(
-                        split_chunk.boundary_diagnostics
-                        + (BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE,)
-                    )
-                ),
-            )
+            raise AssertionError("Clause v2 packing exceeded hard_max_chars.")
         split_chunks.append(split_chunk)
-        preceding_semantic_unit = last_semantic_unit
     return split_chunks
 
 
