@@ -238,6 +238,7 @@ def test_small_frozen_fixture_uses_same_judge_and_retrieval_configuration():
         assert result.retrieval_unit_count > 0
         assert result.chunking_latency_seconds >= 0
         assert result.hard_negative_confusions == {"similar_clause": 0}
+        assert all(result.correctness_invariants.values())
     assert report.paired_comparisons[0].coverage_at_3.confidence_level == 0.95
 
     markdown = render_benchmark_markdown(report)
@@ -245,6 +246,33 @@ def test_small_frozen_fixture_uses_same_judge_and_retrieval_configuration():
     assert "Coverage under token budget" in markdown
     assert "Annotation disagreement" in markdown
     assert "Paired 95% confidence intervals" in markdown
+
+
+def test_irrelevant_context_is_measured_within_the_fixed_token_budget():
+    source = _source()
+    benchmark = build_frozen_benchmark(
+        sources=(source,),
+        annotation_pairs={
+            source.source_id: ((_draft("a", "model-a"), _draft("b", "model-b")),)
+        },
+        adjudications={},
+        config=replace(_config(), context_token_budget=len(source.pages[0].text)),
+    )
+
+    report = run_frozen_benchmark(
+        benchmark,
+        strategies=(StrategyConfig(name="legacy", chunking_strategy="legacy"),),
+        embedder=KeywordEmbedder(),
+        token_counter=CharacterTokenCounter(),
+        bootstrap_samples=100,
+    )
+
+    expected = (
+        len(source.pages[0].text) - len("等待期为九十日。")
+    ) / len(source.pages[0].text)
+    assert report.strategy_results[0].irrelevant_context_proportion == pytest.approx(
+        expected
+    )
 
 
 def test_uncertain_cases_are_excluded_from_primary_scores_but_reported():

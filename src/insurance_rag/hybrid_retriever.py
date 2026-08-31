@@ -31,6 +31,8 @@ _INSURANCE_TERMS: tuple[str, ...] = (
 _ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
 _CJK_TOKEN_RE = re.compile(r"^[\u4e00-\u9fff]+$")
+BM25_TOKENIZER_VERSION = "insurance-terms-ascii-cjk-unigram-bigram/v1"
+DEFAULT_RRF_K = 60
 
 
 def tokenize_for_bm25(text: str) -> list[str]:
@@ -134,7 +136,7 @@ class HybridRetriever:
         vector_index,
         embedder,
         *,
-        rrf_k: int = 60,
+        rrf_k: int = DEFAULT_RRF_K,
         retrieval_mode: str = "hybrid",
     ) -> None:
         self.chunks: tuple[DocumentChunk, ...] = tuple(chunks)

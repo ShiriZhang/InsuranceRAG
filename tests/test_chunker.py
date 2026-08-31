@@ -357,8 +357,35 @@ def test_clause_v2_carries_one_complete_preceding_semantic_unit_as_context():
     assert chunks[1].body_overlap_context == "第一句说明基本责任。"
     assert chunks[1].body_overlap_context in chunks[1].retrieval_text
     assert chunks[1].body_overlap_context not in chunks[1].authoritative_text
+    assert all(chunk.trusted_heading_count == 1 for chunk in chunks)
     assert "".join(span.text for chunk in chunks for span in chunk.source_spans) == text
     assert all(len(chunk.retrieval_text) <= 72 for chunk in chunks)
+
+
+def test_clause_v2_semantic_overlap_never_exceeds_hard_max_chars():
+    text = (
+        "第六条 保险责任\n"
+        "第一句说明基本责任。第二句说明给付条件。第三句说明除外边界。"
+    )
+    chunks = chunk_pages(
+        (DocumentPage(page_number=1, text=text, extraction_method="text"),),
+        source_name="policy.pdf",
+        source_type="silver_benchmark",
+        chunk_size=40,
+        overlap=0,
+        strategy="clause_v2",
+        target_chars=40,
+        hard_max_chars=55,
+        body_overlap_mode="preceding_semantic_unit",
+    )
+
+    assert all(len(chunk.retrieval_text) <= 55 for chunk in chunks)
+    assert all(
+        chunk.body_overlap_context
+        or "semantic_overlap_unavailable" in chunk.boundary_diagnostics
+        or index == 0
+        for index, chunk in enumerate(chunks)
+    )
 
 
 def test_clause_v2_uses_observable_windows_for_indivisible_overlong_sentence():

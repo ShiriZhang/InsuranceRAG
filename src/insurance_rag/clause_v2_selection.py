@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from importlib.metadata import version as package_version
 from typing import Mapping
 
+from insurance_rag.hybrid_retriever import (
+    BM25_TOKENIZER_VERSION,
+    DEFAULT_RRF_K,
+)
 from insurance_rag.silver_benchmark import (
     BenchmarkReport,
     Embedder,
@@ -136,11 +141,7 @@ def run_development_selection(
             target_chars=selected_trial.target_chars,
             hard_max_chars=selected_trial.hard_max_chars,
             body_overlap_mode=(
-                "preceding_semantic_unit"
-                if selected_result.strategy_name.endswith(
-                    "preceding_semantic_unit"
-                )
-                else "zero_body_overlap"
+                selected_result.body_overlap_mode
             ),
             context_token_budget=selected_trial.context_token_budget,
             tokenizer_id=config.tokenizer_id,
@@ -151,7 +152,17 @@ def run_development_selection(
             document_split_manifest_sha256=document_split_manifest_sha256,
             retrieval_configuration={
                 "embedding_model_id": config.embedding_model_id,
-                "lexical_retrieval": "hybrid-bm25-production",
+                "retrieval_mode": "hybrid",
+                "lexical_retrieval": {
+                    "algorithm": "BM25Okapi",
+                    "package": "rank-bm25",
+                    "package_version": package_version("rank-bm25"),
+                    "tokenizer_version": BM25_TOKENIZER_VERSION,
+                },
+                "fusion": {
+                    "algorithm": "reciprocal_rank_fusion",
+                    "rrf_k": DEFAULT_RRF_K,
+                },
                 "query_rewrite_version": config.query_rewrite_version,
                 "reranker_version": config.reranker_version,
                 "retrieval_depth": config.retrieval_depth,
@@ -166,6 +177,7 @@ def select_development_trial(
     *,
     bootstrap_samples: int = 2000,
 ) -> tuple[DevelopmentTrial, StrategyResult]:
+    eligible: list[tuple[DevelopmentTrial, StrategyResult]] = []
     for trial in trials:
         results = {result.strategy_name: result for result in trial.report.strategy_results}
         required = {
@@ -180,10 +192,10 @@ def select_development_trial(
         baseline = results["legacy"]
         zero_overlap = results["clause_v2_zero_body_overlap"]
         semantic_overlap = results["clause_v2_preceding_semantic_unit"]
-        if not _passes_guardrails(
+        if _passes_guardrails(
             baseline, zero_overlap, bootstrap_samples=bootstrap_samples
         ):
-            continue
+            eligible.append((trial, zero_overlap))
         if _passes_guardrails(
             baseline, semantic_overlap, bootstrap_samples=bootstrap_samples
         ):
@@ -193,9 +205,12 @@ def select_development_trial(
                 bootstrap_samples=bootstrap_samples,
             )
             if overlap_gain.lower > 0:
-                return trial, semantic_overlap
-        return trial, zero_overlap
-    raise ValueError("No clause_v2 development candidate satisfies every promotion rule.")
+                eligible.append((trial, semantic_overlap))
+    if not eligible:
+        raise ValueError(
+            "No clause_v2 development candidate satisfies every promotion rule."
+        )
+    return max(eligible, key=_candidate_selection_key)
 
 
 def render_development_selection_markdown(
@@ -252,9 +267,24 @@ def _passes_guardrails(
         tuple(candidate.case_coverage_under_budget[index] for index in boundary_indexes),
         bootstrap_samples=bootstrap_samples,
     )
+    hard_negative_indexes = tuple(
+        index
+        for index, applicable in enumerate(
+            baseline.case_hard_negative_applicable
+        )
+        if applicable
+    )
+    if not hard_negative_indexes:
+        return False
     hard_negative = paired_confidence_interval(
-        baseline.case_hard_negative_confusion,
-        candidate.case_hard_negative_confusion,
+        tuple(
+            baseline.case_hard_negative_confusion[index]
+            for index in hard_negative_indexes
+        ),
+        tuple(
+            candidate.case_hard_negative_confusion[index]
+            for index in hard_negative_indexes
+        ),
         bootstrap_samples=bootstrap_samples,
     )
     irrelevant_context = paired_confidence_interval(
@@ -276,4 +306,32 @@ def _passes_guardrails(
             <= baseline.p95_chunking_latency_seconds * 2,
             all(candidate.correctness_invariants.values()),
         )
+    )
+
+
+def _candidate_selection_key(
+    candidate: tuple[DevelopmentTrial, StrategyResult],
+) -> tuple[float, ...]:
+    trial, result = candidate
+    boundary_values = [
+        value
+        for name, value in result.coverage_under_budget_by_stratum.items()
+        if name in BOUNDARY_SENSITIVE_STRATA
+    ]
+    boundary_coverage = (
+        sum(boundary_values) / len(boundary_values)
+        if boundary_values
+        else 0.0
+    )
+    return (
+        result.coverage_under_token_budget,
+        result.coverage_at[3],
+        boundary_coverage,
+        float(result.body_overlap_mode == "zero_body_overlap"),
+        -float(result.embedding_tokens),
+        -float(result.retrieval_unit_count),
+        -result.p95_chunking_latency_seconds,
+        -float(trial.context_token_budget),
+        -float(trial.hard_max_chars),
+        -float(trial.target_chars),
     )

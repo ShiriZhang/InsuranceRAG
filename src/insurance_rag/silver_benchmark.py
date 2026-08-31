@@ -14,6 +14,7 @@ from insurance_rag.config import AppConfig
 from insurance_rag.document_loader import parse_pdf_bytes
 from insurance_rag.hybrid_retriever import HybridRetriever, HybridSearchResult
 from insurance_rag.models import DocumentChunk, DocumentPage
+from insurance_rag.models import BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE
 from insurance_rag.query_rewriter import rewrite_query
 from insurance_rag.retriever import InMemoryVectorIndex
 from insurance_rag.rule_reranker import rerank_results
@@ -385,6 +386,10 @@ class AnnotationSummary:
 @dataclass(frozen=True)
 class StrategyResult:
     strategy_name: str
+    chunking_strategy: str
+    target_chars: int
+    hard_max_chars: int
+    body_overlap_mode: str
     scored_cases: int
     coverage_at: Mapping[int, float]
     coverage_under_token_budget: float
@@ -402,6 +407,7 @@ class StrategyResult:
     case_coverage_under_budget: tuple[float, ...]
     case_irrelevant_context_proportion: tuple[float, ...]
     case_hard_negative_confusion: tuple[float, ...]
+    case_hard_negative_applicable: tuple[bool, ...]
     case_strata: tuple[tuple[str, ...], ...]
 
 
@@ -822,6 +828,11 @@ def _run_strategy(
         "non_empty_retrieval_units": True,
         "source_spans_exact": True,
         "semantic_overlap_distinct_from_source_spans": True,
+        "semantic_overlap_complete": True,
+        "authoritative_source_coverage_exact": True,
+        "no_unintended_source_duplication": True,
+        "clause_purity": True,
+        "parseable_policies_indexed": True,
     }
     for source in benchmark.sources:
         page_by_number = {page.page_number: page for page in source.pages}
@@ -874,12 +885,38 @@ def _run_strategy(
                 ):
                     correctness_invariants["source_spans_exact"] = False
                 if (
-                    strategy.body_overlap_mode == "preceding_semantic_unit"
-                    and chunk.body_overlap_context
-                    and chunk.body_overlap_context in chunk.authoritative_text
+                    BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE
+                    in chunk.boundary_diagnostics
                 ):
+                    correctness_invariants["semantic_overlap_complete"] = False
+                if chunk.trusted_heading_count > 1:
+                    correctness_invariants["clause_purity"] = False
+        if strategy.chunking_strategy == "clause_v2":
+            spans_by_page: dict[int, list[tuple[int, int]]] = {}
+            for chunk in chunks:
+                for span in chunk.source_spans:
+                    spans_by_page.setdefault(span.page_number, []).append(
+                        (span.start_char, span.end_char)
+                    )
+            for page in source.pages:
+                if not page.text:
+                    continue
+                cursor = 0
+                for start_char, end_char in sorted(
+                    spans_by_page.get(page.page_number, ())
+                ):
+                    if start_char < cursor:
+                        correctness_invariants[
+                            "no_unintended_source_duplication"
+                        ] = False
+                    if start_char != cursor:
+                        correctness_invariants[
+                            "authoritative_source_coverage_exact"
+                        ] = False
+                    cursor = max(cursor, end_char)
+                if cursor != len(page.text):
                     correctness_invariants[
-                        "semantic_overlap_distinct_from_source_spans"
+                        "authoritative_source_coverage_exact"
                     ] = False
 
     coverage_by_k: dict[int, list[float]] = {1: [], 3: [], 5: []}
@@ -890,6 +927,7 @@ def _run_strategy(
     hard_negative_confusions: dict[str, int] = {}
     case_irrelevant_context: list[float] = []
     case_hard_negative_confusion: list[float] = []
+    case_hard_negative_applicable: list[bool] = []
     case_strata: list[tuple[str, ...]] = []
     for case in cases:
         source = source_by_id[case.source_id]
@@ -935,7 +973,7 @@ def _run_strategy(
         )
         case_irrelevant, case_retrieved = _irrelevant_context_chars(
             source,
-            retrieved,
+            budgeted,
             case.evidence_spans,
         )
         irrelevant_chars += case_irrelevant
@@ -943,6 +981,9 @@ def _run_strategy(
         case_irrelevant_context.append(_rate(case_irrelevant, case_retrieved))
         case_strata.append(case.strata)
         confused = False
+        case_hard_negative_applicable.append(
+            case.hard_negative_category is not None
+        )
         if case.hard_negative_category:
             hard_negative_confusions.setdefault(case.hard_negative_category, 0)
             if _covers_any_span(
@@ -965,6 +1006,10 @@ def _run_strategy(
 
     return StrategyResult(
         strategy_name=strategy.name,
+        chunking_strategy=strategy.chunking_strategy,
+        target_chars=strategy.target_chars,
+        hard_max_chars=strategy.hard_max_chars,
+        body_overlap_mode=strategy.body_overlap_mode,
         scored_cases=len(cases),
         coverage_at={
             top_k: _mean(values) for top_k, values in coverage_by_k.items()
@@ -984,6 +1029,7 @@ def _run_strategy(
         case_coverage_under_budget=tuple(coverage_under_budget),
         case_irrelevant_context_proportion=tuple(case_irrelevant_context),
         case_hard_negative_confusion=tuple(case_hard_negative_confusion),
+        case_hard_negative_applicable=tuple(case_hard_negative_applicable),
         case_strata=tuple(case_strata),
     )
 

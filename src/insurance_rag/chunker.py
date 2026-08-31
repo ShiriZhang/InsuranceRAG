@@ -16,6 +16,7 @@ from insurance_rag.models import (
     BOUNDARY_PAGE_GAP_SEVERE_OCR_UNCERTAINTY,
     BOUNDARY_PAGE_GAP_UNREADABLE,
     BOUNDARY_REJECTED_PAGE_HEADER_FOOTER,
+    BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE,
     BOUNDARY_UNKNOWN_CLAUSE_PAGE_FALLBACK,
     CHUNKING_STRATEGIES,
     ClauseMetadata,
@@ -378,6 +379,37 @@ def _split_clause_v2_chunk(
             ),
             boundary_diagnostics=diagnostics,
         )
+        if len(split_chunk.retrieval_text) > hard_max_chars:
+            if split_chunks:
+                previous = split_chunks[-1]
+                merged_spans = _coalesce_contiguous_spans(
+                    list(previous.source_spans + split_chunk.source_spans)
+                )
+                merged = replace(
+                    previous,
+                    text=_spans_text(merged_spans).strip(),
+                    source_spans=merged_spans,
+                    boundary_diagnostics=tuple(
+                        dict.fromkeys(
+                            previous.boundary_diagnostics
+                            + split_chunk.boundary_diagnostics
+                        )
+                    ),
+                )
+                if len(merged.retrieval_text) <= hard_max_chars:
+                    split_chunks[-1] = merged
+                    preceding_semantic_unit = last_semantic_unit
+                    continue
+            split_chunk = replace(
+                split_chunk,
+                body_overlap_context="",
+                boundary_diagnostics=tuple(
+                    dict.fromkeys(
+                        split_chunk.boundary_diagnostics
+                        + (BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE,)
+                    )
+                ),
+            )
         split_chunks.append(split_chunk)
         preceding_semantic_unit = last_semantic_unit
     return split_chunks
@@ -512,6 +544,11 @@ def _chunk_clause_v2_pages(
                 ),
                 boundary_diagnostics=boundary_diagnostics,
                 chunking_strategy="clause_v2",
+                trusted_heading_count=(
+                    1
+                    if metadata.heading_confidence in {"high", "medium"}
+                    else 0
+                ),
             )
             continues_active_clause = (
                 metadata.heading_confidence == "low"
@@ -531,6 +568,10 @@ def _chunk_clause_v2_pages(
                         dict.fromkeys(active_chunk.quality_notes + chunk.quality_notes)
                     ),
                     source_spans=active_chunk.source_spans + chunk.source_spans,
+                    trusted_heading_count=(
+                        active_chunk.trusted_heading_count
+                        + chunk.trusted_heading_count
+                    ),
                     boundary_diagnostics=tuple(
                         dict.fromkeys(
                             active_chunk.boundary_diagnostics

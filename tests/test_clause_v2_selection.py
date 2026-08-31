@@ -21,6 +21,14 @@ def _result(name: str, coverage: tuple[float, ...]) -> StrategyResult:
     count = len(coverage)
     return StrategyResult(
         strategy_name=name,
+        chunking_strategy="legacy" if name == "legacy" else "clause_v2",
+        target_chars=900,
+        hard_max_chars=1200,
+        body_overlap_mode=(
+            "preceding_semantic_unit"
+            if name.endswith("preceding_semantic_unit")
+            else "zero_body_overlap"
+        ),
         scored_cases=count,
         coverage_at={1: 0.0, 3: 0.0, 5: 0.0},
         coverage_under_token_budget=sum(coverage) / count,
@@ -40,6 +48,7 @@ def _result(name: str, coverage: tuple[float, ...]) -> StrategyResult:
         case_coverage_under_budget=coverage,
         case_irrelevant_context_proportion=tuple(0.1 for _ in coverage),
         case_hard_negative_confusion=tuple(0.0 for _ in coverage),
+        case_hard_negative_applicable=tuple(True for _ in coverage),
         case_strata=tuple(
             ("multi_sentence_conditions_outcomes",) for _ in coverage
         ),
@@ -97,6 +106,35 @@ def test_semantic_overlap_requires_clear_paired_gain_over_zero_overlap():
         selected_result.strategy_name
         == "clause_v2_preceding_semantic_unit"
     )
+
+
+def test_selection_compares_all_trials_instead_of_taking_input_order():
+    weaker = _trial(zero_improvements=4, semantic_improvements=4)
+    stronger = replace(
+        _trial(zero_improvements=8, semantic_improvements=8),
+        target_chars=1200,
+        hard_max_chars=1600,
+    )
+
+    selected_trial, _ = select_development_trial(
+        (weaker, stronger), bootstrap_samples=1000
+    )
+    reversed_trial, _ = select_development_trial(
+        (stronger, weaker), bootstrap_samples=1000
+    )
+
+    assert selected_trial is stronger
+    assert reversed_trial is stronger
+
+
+def test_semantic_overlap_can_win_when_zero_overlap_fails_guardrails():
+    trial = _trial(zero_improvements=0, semantic_improvements=8)
+
+    _, selected_result = select_development_trial(
+        (trial,), bootstrap_samples=1000
+    )
+
+    assert selected_result.body_overlap_mode == "preceding_semantic_unit"
 
 
 def test_development_selection_rejects_held_out_before_retrieval_runs():

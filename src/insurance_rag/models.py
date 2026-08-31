@@ -14,6 +14,7 @@ BOUNDARY_LOW_CONFIDENCE_HEADING_CANDIDATE = "low_confidence_heading_candidate"
 BOUNDARY_REJECTED_PAGE_HEADER_FOOTER = "rejected_page_header_footer"
 BOUNDARY_CROSS_PAGE_CLAUSE_CONTINUATION = "cross_page_clause_continuation"
 BOUNDARY_CHARACTER_WINDOW_FALLBACK = "character_window_fallback"
+BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE = "semantic_overlap_unavailable"
 BOUNDARY_PAGE_GAP_EMPTY = "page_gap:empty"
 BOUNDARY_PAGE_GAP_UNREADABLE = "page_gap:unreadable"
 BOUNDARY_PAGE_GAP_SEVERE_OCR_UNCERTAINTY = "page_gap:severe_ocr_uncertainty"
@@ -73,6 +74,7 @@ class DocumentChunk:
     source_spans: tuple[SourceSpan, ...] = ()
     boundary_diagnostics: tuple[str, ...] = ()
     chunking_strategy: str = "legacy"
+    trusted_heading_count: int = 0
 
     @property
     def retrieval_text(self) -> str:
