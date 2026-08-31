@@ -19,6 +19,7 @@ from insurance_rag.silver_benchmark import (
     adjudicate_annotations,
     build_frozen_benchmark,
     generate_frozen_benchmark,
+    load_frozen_benchmark_manifest,
     render_benchmark_markdown,
     run_frozen_benchmark,
     source_from_pdf_bytes,
@@ -178,6 +179,26 @@ def test_frozen_manifest_records_hashes_models_prompts_parameters_and_outcomes()
     assert manifest["annotation_runs"][0]["generation_parameters"] == {
         "temperature": 0
     }
+
+
+def test_frozen_manifest_can_be_rehydrated_only_with_matching_sources():
+    source = _source()
+    benchmark = build_frozen_benchmark(
+        sources=(source,),
+        annotation_pairs={
+            source.source_id: ((_draft("a", "model-a"), _draft("b", "model-b")),)
+        },
+        adjudications={},
+        config=_config(),
+    )
+
+    loaded = load_frozen_benchmark_manifest(
+        benchmark.to_manifest(), sources=(source,)
+    )
+
+    assert loaded.manifest_sha256 == benchmark.manifest_sha256
+    with pytest.raises(ValueError, match="source is unavailable"):
+        load_frozen_benchmark_manifest(benchmark.to_manifest(), sources=())
 
 
 def test_small_frozen_fixture_uses_same_judge_and_retrieval_configuration():

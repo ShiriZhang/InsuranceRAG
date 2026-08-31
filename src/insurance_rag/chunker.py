@@ -7,6 +7,7 @@ from insurance_rag.clause_parser import (
     parse_clause_metadata,
 )
 from insurance_rag.models import (
+    BODY_OVERLAP_MODES,
     BOUNDARY_CHARACTER_WINDOW_FALLBACK,
     BOUNDARY_CROSS_PAGE_CLAUSE_CONTINUATION,
     BOUNDARY_LEGACY_PAGE_LINE_PACKING,
@@ -240,11 +241,21 @@ def _spans_text(spans: tuple[SourceSpan, ...] | list[SourceSpan]) -> str:
     return "\n".join(span.text for span in _coalesce_contiguous_spans(list(spans)))
 
 
+def _body_semantic_unit_text(text: str, heading_text: str | None) -> str:
+    if not heading_text:
+        return text
+    first_line, separator, remainder = text.partition("\n")
+    if separator and first_line.strip() == heading_text.strip():
+        return remainder.strip()
+    return text
+
+
 def _split_clause_v2_chunk(
     chunk: DocumentChunk,
     *,
     target_chars: int,
     hard_max_chars: int,
+    body_overlap_mode: str,
 ) -> list[DocumentChunk]:
     if hard_max_chars < 3:
         raise ValueError(
@@ -296,10 +307,15 @@ def _split_clause_v2_chunk(
                     )
                 )
 
-    packed: list[tuple[list[SourceSpan], bool]] = []
+    packed: list[tuple[list[SourceSpan], bool, str]] = []
     current_spans: list[SourceSpan] = []
     current_uses_window = False
+    current_last_semantic_unit = ""
     for unit_spans, uses_window in semantic_units:
+        unit_text = _body_semantic_unit_text(
+            _spans_text(unit_spans).strip(),
+            chunk.heading_text,
+        )
         candidate_spans = current_spans + unit_spans
         candidate_length = len(_spans_text(candidate_spans).strip())
         if current_spans and candidate_length > body_target_chars:
@@ -319,33 +335,51 @@ def _split_clause_v2_chunk(
             if candidate_is_closer:
                 current_spans = candidate_spans
                 current_uses_window = current_uses_window or uses_window
+                current_last_semantic_unit = unit_text
             else:
-                packed.append((current_spans, current_uses_window))
+                packed.append(
+                    (
+                        current_spans,
+                        current_uses_window,
+                        current_last_semantic_unit,
+                    )
+                )
                 current_spans = list(unit_spans)
                 current_uses_window = uses_window
+                current_last_semantic_unit = unit_text
         else:
             current_spans = candidate_spans
             current_uses_window = current_uses_window or uses_window
+            current_last_semantic_unit = unit_text
     if current_spans:
-        packed.append((current_spans, current_uses_window))
+        packed.append(
+            (current_spans, current_uses_window, current_last_semantic_unit)
+        )
 
     split_chunks: list[DocumentChunk] = []
-    for spans, uses_window in packed:
+    preceding_semantic_unit = ""
+    for chunk_index, (spans, uses_window, last_semantic_unit) in enumerate(packed):
         coalesced_spans = _coalesce_contiguous_spans(spans)
         diagnostics = chunk.boundary_diagnostics
         if uses_window or context_uses_window:
             diagnostics = tuple(
                 dict.fromkeys(diagnostics + (BOUNDARY_CHARACTER_WINDOW_FALLBACK,))
             )
-        split_chunks.append(
-            replace(
-                chunk,
-                text=_spans_text(coalesced_spans).strip(),
-                page_number=coalesced_spans[0].page_number,
-                source_spans=coalesced_spans,
-                boundary_diagnostics=diagnostics,
-            )
+        split_chunk = replace(
+            chunk,
+            text=_spans_text(coalesced_spans).strip(),
+            page_number=coalesced_spans[0].page_number,
+            source_spans=coalesced_spans,
+            body_overlap_context=(
+                preceding_semantic_unit
+                if body_overlap_mode == "preceding_semantic_unit"
+                and chunk_index > 0
+                else ""
+            ),
+            boundary_diagnostics=diagnostics,
         )
+        split_chunks.append(split_chunk)
+        preceding_semantic_unit = last_semantic_unit
     return split_chunks
 
 
@@ -395,6 +429,7 @@ def _chunk_clause_v2_pages(
     source_type: str,
     target_chars: int,
     hard_max_chars: int,
+    body_overlap_mode: str,
 ) -> tuple[DocumentChunk, ...]:
     chunks: list[DocumentChunk] = []
     current_title = UNKNOWN_SECTION_TITLE
@@ -528,6 +563,7 @@ def _chunk_clause_v2_pages(
             chunk,
             target_chars=target_chars,
             hard_max_chars=hard_max_chars,
+            body_overlap_mode=body_overlap_mode,
         )
     ]
     return tuple(
@@ -551,10 +587,13 @@ def chunk_pages(
     strategy: str = "legacy",
     target_chars: int | None = None,
     hard_max_chars: int | None = None,
+    body_overlap_mode: str = "zero_body_overlap",
 ) -> tuple[DocumentChunk, ...]:
     if strategy not in CHUNKING_STRATEGIES:
         raise ValueError(f"Unsupported chunking strategy: {strategy!r}")
     if strategy == "legacy":
+        if body_overlap_mode != "zero_body_overlap":
+            raise ValueError("Body overlap is only supported by clause_v2.")
         return _chunk_legacy_pages(
             pages,
             source_name=source_name,
@@ -569,10 +608,13 @@ def chunk_pages(
         raise ValueError("target_chars must be positive")
     if resolved_hard_max_chars < resolved_target_chars:
         raise ValueError("hard_max_chars must be at least target_chars")
+    if body_overlap_mode not in BODY_OVERLAP_MODES:
+        raise ValueError(f"Unsupported body overlap mode: {body_overlap_mode!r}")
     return _chunk_clause_v2_pages(
         pages,
         source_name=source_name,
         source_type=source_type,
         target_chars=resolved_target_chars,
         hard_max_chars=resolved_hard_max_chars,
+        body_overlap_mode=body_overlap_mode,
     )

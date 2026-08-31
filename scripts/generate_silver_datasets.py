@@ -34,7 +34,7 @@ from insurance_rag.silver_corpus import (
     build_evidence_case_plan,
     freeze_insurer_document_split,
 )
-from insurance_rag.silver_dataset import freeze_silver_datasets
+from insurance_rag.silver_dataset import DatasetSplit, freeze_silver_datasets
 from insurance_rag.silver_generation import (
     load_silver_generation_config,
     write_json_atomic,
@@ -221,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
         benchmark=benchmark,
         document_split=document_split,
         config=config.freeze_config(),
+    )
+    write_json_atomic(
+        output_dir / "development_benchmark_v2.json",
+        frozen.benchmark_for(DatasetSplit.DEVELOPMENT).to_manifest(),
     )
     write_json_atomic(output_dir / "silver_release_v2.json", frozen.to_manifest())
     runtime["release_manifest_sha256"] = frozen.manifest_sha256

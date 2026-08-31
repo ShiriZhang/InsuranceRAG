@@ -251,12 +251,114 @@ class FrozenBenchmark:
         return _sha256(payload)
 
 
+def load_frozen_benchmark_manifest(
+    payload: Mapping[str, object],
+    *,
+    sources: tuple[BenchmarkSource, ...],
+) -> FrozenBenchmark:
+    """Rehydrate a frozen manifest using separately rebuilt authoritative sources."""
+    source_by_id = {source.source_id: source for source in sources}
+    source_records = tuple(payload.get("source_records", ()))
+    ordered_sources: list[BenchmarkSource] = []
+    for record in source_records:
+        if not isinstance(record, dict):
+            raise ValueError("Frozen source records must be objects.")
+        source_id = str(record["source_id"])
+        source = source_by_id.get(source_id)
+        if source is None:
+            raise ValueError(f"Frozen manifest source is unavailable: {source_id}")
+        ordered_sources.append(source)
+
+    config_payload = payload.get("config")
+    if not isinstance(config_payload, dict):
+        raise ValueError("Frozen benchmark manifest requires a config object.")
+    config = BenchmarkConfig(**config_payload)
+    annotation_runs = tuple(
+        _annotation_metadata_from_manifest(item)
+        for item in payload.get("annotation_runs", ())
+    )
+    cases = tuple(
+        _silver_case_from_manifest(item, annotation_runs)
+        for item in payload.get("cases", ())
+    )
+    benchmark = FrozenBenchmark(
+        version=str(payload["version"]),
+        sources=tuple(ordered_sources),
+        cases=cases,
+        config=config,
+        annotation_runs=annotation_runs,
+    )
+    expected = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    actual = json.dumps(
+        benchmark.to_manifest(), ensure_ascii=False, sort_keys=True
+    )
+    if actual != expected:
+        raise ValueError(
+            "Rebuilt sources or labels do not match the frozen benchmark manifest."
+        )
+    return benchmark
+
+
+def _annotation_metadata_from_manifest(value: object) -> AnnotationMetadata:
+    if not isinstance(value, dict):
+        raise ValueError("Frozen annotation runs must be objects.")
+    parameters = value.get("generation_parameters", {})
+    if not isinstance(parameters, dict):
+        raise ValueError("Frozen generation_parameters must be an object.")
+    return AnnotationMetadata(
+        annotator_id=str(value["annotator_id"]),
+        model_id=str(value["model_id"]),
+        prompt_version=str(value["prompt_version"]),
+        generation_parameters=tuple(sorted(parameters.items())),
+    )
+
+
+def _silver_case_from_manifest(
+    value: object,
+    annotation_runs: tuple[AnnotationMetadata, ...],
+) -> SilverCase:
+    if not isinstance(value, dict):
+        raise ValueError("Frozen Silver cases must be objects.")
+    strata = tuple(str(item) for item in value.get("strata", ()))
+    stratum = str(value["stratum"])
+    return SilverCase(
+        case_id=str(value["case_id"]),
+        source_id=str(value["source_id"]),
+        question=str(value["question"]),
+        evidence_spans=tuple(
+            EvidenceSpan(**span) for span in value.get("evidence_spans", ())
+        ),
+        stratum=stratum,
+        additional_strata=tuple(item for item in strata if item != stratum),
+        hard_negative_category=(
+            str(value["hard_negative_category"])
+            if value.get("hard_negative_category") is not None
+            else None
+        ),
+        hard_negative_spans=tuple(
+            EvidenceSpan(**span)
+            for span in value.get("hard_negative_spans", ())
+        ),
+        annotation_uncertain=bool(value["annotation_uncertain"]),
+        initial_disagreement=bool(value["initial_disagreement"]),
+        adjudicated=bool(value["adjudicated"]),
+        annotation_outcome=str(value["annotation_outcome"]),
+        annotation_metadata=annotation_runs,
+        annotation_response_metadata=tuple(
+            AnnotationResponseMetadata(**response)
+            for response in value.get("annotation_responses", ())
+        ),
+        annotation_slot_id=str(value.get("annotation_slot_id", "")),
+    )
+
+
 @dataclass(frozen=True)
 class StrategyConfig:
     name: str
     chunking_strategy: str
     target_chars: int = 900
     hard_max_chars: int = 1200
+    body_overlap_mode: str = "zero_body_overlap"
 
 
 @dataclass(frozen=True)
@@ -292,8 +394,15 @@ class StrategyResult:
     embedding_tokens: int
     retrieval_unit_count: int
     chunking_latency_seconds: float
+    p95_chunking_latency_seconds: float
+    coverage_under_budget_by_stratum: Mapping[str, float]
+    boundary_diagnostics: Mapping[str, int]
+    correctness_invariants: Mapping[str, bool]
     case_coverage_at_3: tuple[float, ...]
     case_coverage_under_budget: tuple[float, ...]
+    case_irrelevant_context_proportion: tuple[float, ...]
+    case_hard_negative_confusion: tuple[float, ...]
+    case_strata: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -634,7 +743,7 @@ def render_benchmark_markdown(report: BenchmarkReport) -> str:
         "",
         "## Retrieval, context, and cost",
         "",
-        "| Strategy | Scored | Coverage@1/@3/@5 | Coverage under token budget | Single-candidate coverage | Irrelevant context | Embedding tokens | Retrieval units | Chunking latency (s) | Hard-negative confusions |",
+        "| Strategy | Scored | Coverage@1/@3/@5 | Coverage under token budget | Single-candidate coverage | Irrelevant context | Embedding tokens | Retrieval units | P95 chunking latency (s) | Hard-negative confusions |",
         "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for result in report.strategy_results:
@@ -654,9 +763,29 @@ def render_benchmark_markdown(report: BenchmarkReport) -> str:
                 irrelevant=result.irrelevant_context_proportion,
                 tokens=result.embedding_tokens,
                 units=result.retrieval_unit_count,
-                latency=result.chunking_latency_seconds,
+                latency=result.p95_chunking_latency_seconds,
                 hard_negatives=hard_negatives,
             )
+        )
+    lines.extend(("", "## Boundary strata", ""))
+    for result in report.strategy_results:
+        strata = ", ".join(
+            f"{name}: {value:.2%}"
+            for name, value in result.coverage_under_budget_by_stratum.items()
+        ) or "none"
+        lines.append(f"- {result.strategy_name}: {strata}")
+    lines.extend(("", "## Diagnostics and correctness invariants", ""))
+    for result in report.strategy_results:
+        diagnostics = ", ".join(
+            f"{name}: {count}"
+            for name, count in sorted(result.boundary_diagnostics.items())
+        ) or "none"
+        invariants = ", ".join(
+            f"{name}: {'pass' if passed else 'FAIL'}"
+            for name, passed in sorted(result.correctness_invariants.items())
+        )
+        lines.append(
+            f"- {result.strategy_name}: diagnostics [{diagnostics}]; invariants [{invariants}]"
         )
     lines.extend(("", "## Paired 95% confidence intervals", ""))
     if not report.paired_comparisons:
@@ -686,7 +815,16 @@ def _run_strategy(
     retrieval_unit_count = 0
     embedding_tokens = 0
     chunking_latency = 0.0
+    source_latencies: list[float] = []
+    boundary_diagnostics: dict[str, int] = {}
+    correctness_invariants = {
+        "hard_max_chars_respected": True,
+        "non_empty_retrieval_units": True,
+        "source_spans_exact": True,
+        "semantic_overlap_distinct_from_source_spans": True,
+    }
     for source in benchmark.sources:
+        page_by_number = {page.page_number: page for page in source.pages}
         started = time.perf_counter()
         chunks = chunk_pages(
             source.pages,
@@ -697,8 +835,11 @@ def _run_strategy(
             strategy=strategy.chunking_strategy,
             target_chars=strategy.target_chars,
             hard_max_chars=strategy.hard_max_chars,
+            body_overlap_mode=strategy.body_overlap_mode,
         )
-        chunking_latency += time.perf_counter() - started
+        source_latency = time.perf_counter() - started
+        chunking_latency += source_latency
+        source_latencies.append(source_latency)
         if not chunks:
             raise ValueError(
                 f"Strategy {strategy.name!r} produced no retrieval units for {source.source_id!r}."
@@ -714,6 +855,32 @@ def _run_strategy(
         )
         retrieval_unit_count += len(chunks)
         embedding_tokens += sum(token_counter(text) for text in texts)
+        for chunk in chunks:
+            for diagnostic in chunk.boundary_diagnostics:
+                boundary_diagnostics[diagnostic] = (
+                    boundary_diagnostics.get(diagnostic, 0) + 1
+                )
+            if len(chunk.retrieval_text) > strategy.hard_max_chars:
+                correctness_invariants["hard_max_chars_respected"] = False
+            if not chunk.retrieval_text.strip():
+                correctness_invariants["non_empty_retrieval_units"] = False
+            if strategy.chunking_strategy == "clause_v2":
+                if any(
+                    page_by_number[span.page_number].text[
+                        span.start_char : span.end_char
+                    ]
+                    != span.text
+                    for span in chunk.source_spans
+                ):
+                    correctness_invariants["source_spans_exact"] = False
+                if (
+                    strategy.body_overlap_mode == "preceding_semantic_unit"
+                    and chunk.body_overlap_context
+                    and chunk.body_overlap_context in chunk.authoritative_text
+                ):
+                    correctness_invariants[
+                        "semantic_overlap_distinct_from_source_spans"
+                    ] = False
 
     coverage_by_k: dict[int, list[float]] = {1: [], 3: [], 5: []}
     coverage_under_budget: list[float] = []
@@ -721,6 +888,9 @@ def _run_strategy(
     irrelevant_chars = 0
     retrieved_chars = 0
     hard_negative_confusions: dict[str, int] = {}
+    case_irrelevant_context: list[float] = []
+    case_hard_negative_confusion: list[float] = []
+    case_strata: list[tuple[str, ...]] = []
     for case in cases:
         source = source_by_id[case.source_id]
         rewrite = rewrite_query(case.question)
@@ -770,12 +940,28 @@ def _run_strategy(
         )
         irrelevant_chars += case_irrelevant
         retrieved_chars += case_retrieved
+        case_irrelevant_context.append(_rate(case_irrelevant, case_retrieved))
+        case_strata.append(case.strata)
+        confused = False
         if case.hard_negative_category:
             hard_negative_confusions.setdefault(case.hard_negative_category, 0)
             if _covers_any_span(
                 retrieved[:1], case.hard_negative_spans, source
             ):
                 hard_negative_confusions[case.hard_negative_category] += 1
+                confused = True
+        case_hard_negative_confusion.append(float(confused))
+
+    coverage_under_budget_by_stratum = {
+        stratum: _mean(
+            [
+                value
+                for value, strata in zip(coverage_under_budget, case_strata)
+                if stratum in strata
+            ]
+        )
+        for stratum in sorted({item for strata in case_strata for item in strata})
+    }
 
     return StrategyResult(
         strategy_name=strategy.name,
@@ -790,8 +976,15 @@ def _run_strategy(
         embedding_tokens=embedding_tokens,
         retrieval_unit_count=retrieval_unit_count,
         chunking_latency_seconds=chunking_latency,
+        p95_chunking_latency_seconds=_percentile(source_latencies, 95),
+        coverage_under_budget_by_stratum=coverage_under_budget_by_stratum,
+        boundary_diagnostics=boundary_diagnostics,
+        correctness_invariants=correctness_invariants,
         case_coverage_at_3=tuple(coverage_by_k[3]),
         case_coverage_under_budget=tuple(coverage_under_budget),
+        case_irrelevant_context_proportion=tuple(case_irrelevant_context),
+        case_hard_negative_confusion=tuple(case_hard_negative_confusion),
+        case_strata=tuple(case_strata),
     )
 
 
@@ -1051,6 +1244,20 @@ def _paired_confidence_interval(
     )
 
 
+def paired_confidence_interval(
+    baseline: tuple[float, ...],
+    candidate: tuple[float, ...],
+    *,
+    bootstrap_samples: int = 2000,
+) -> ConfidenceInterval:
+    """Return a deterministic paired bootstrap interval for frozen cases."""
+    return _paired_confidence_interval(
+        baseline,
+        candidate,
+        bootstrap_samples=bootstrap_samples,
+    )
+
+
 def _source_text(pages: tuple[DocumentPage, ...]) -> str:
     return "\n\f\n".join(
         f"page:{page.page_number}\n{page.text}" for page in pages
@@ -1069,6 +1276,13 @@ def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return sum(values) / len(values)
+
+
+def _percentile(values: list[float], percentile: int) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return ordered[round((len(ordered) - 1) * percentile / 100)]
 
 
 def _rate(numerator: int, denominator: int) -> float:

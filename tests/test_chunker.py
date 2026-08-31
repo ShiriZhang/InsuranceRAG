@@ -334,6 +334,33 @@ def test_clause_v2_does_not_emit_heading_without_governed_body():
     assert all(chunk.text.strip() != "第六条 保险责任" for chunk in chunks)
 
 
+def test_clause_v2_carries_one_complete_preceding_semantic_unit_as_context():
+    text = (
+        "第六条 保险责任\n"
+        "第一句说明基本责任。第二句说明给付条件。第三句说明除外边界。"
+    )
+    pages = (DocumentPage(page_number=1, text=text, extraction_method="text"),)
+
+    chunks = chunk_pages(
+        pages,
+        source_name="policy.pdf",
+        source_type="silver_benchmark",
+        chunk_size=38,
+        overlap=0,
+        strategy="clause_v2",
+        target_chars=38,
+        hard_max_chars=72,
+        body_overlap_mode="preceding_semantic_unit",
+    )
+
+    assert len(chunks) > 1
+    assert chunks[1].body_overlap_context == "第一句说明基本责任。"
+    assert chunks[1].body_overlap_context in chunks[1].retrieval_text
+    assert chunks[1].body_overlap_context not in chunks[1].authoritative_text
+    assert "".join(span.text for chunk in chunks for span in chunk.source_spans) == text
+    assert all(len(chunk.retrieval_text) <= 72 for chunk in chunks)
+
+
 def test_clause_v2_uses_observable_windows_for_indivisible_overlong_sentence():
     body = "本合同对一次事故造成的全部损失按照约定比例承担保险责任且不超过保险金额。"
     page = DocumentPage(

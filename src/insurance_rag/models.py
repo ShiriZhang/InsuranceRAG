@@ -3,6 +3,9 @@ from enum import Enum
 
 
 CHUNKING_STRATEGIES = frozenset({"legacy", "clause_v2"})
+BODY_OVERLAP_MODES = frozenset(
+    {"zero_body_overlap", "preceding_semantic_unit"}
+)
 PAGE_QUALITY_UNREADABLE = "unreadable_page"
 PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY = "severe_ocr_uncertainty"
 BOUNDARY_LEGACY_PAGE_LINE_PACKING = "legacy_page_line_packing"
@@ -66,15 +69,22 @@ class DocumentChunk:
     heading_confidence: str = "low"
     heading_source: str = "fallback"
     retrieval_context: str = ""
+    body_overlap_context: str = ""
     source_spans: tuple[SourceSpan, ...] = ()
     boundary_diagnostics: tuple[str, ...] = ()
     chunking_strategy: str = "legacy"
 
     @property
     def retrieval_text(self) -> str:
-        if not self.retrieval_context:
-            return self.text
-        return f"{self.retrieval_context}\n{self.text}"
+        return "\n".join(
+            value
+            for value in (
+                self.retrieval_context,
+                self.body_overlap_context,
+                self.text,
+            )
+            if value
+        )
 
     @property
     def authoritative_text(self) -> str:
