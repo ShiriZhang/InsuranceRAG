@@ -348,6 +348,43 @@ def test_generation_is_evidence_first_and_annotators_never_receive_chunks():
     assert benchmark.cases[0].annotation_outcome == "agreed"
 
 
+def test_generation_supports_bounded_source_concurrency_and_preserves_order():
+    first_source = _source()
+    second_source = replace(
+        first_source,
+        source_id="fixture-policy-v2",
+        source_name="fixture-policy-v2.pdf",
+    )
+
+    benchmark = generate_frozen_benchmark(
+        sources=(first_source, second_source),
+        first_pass=lambda _source: (_draft("first", "model-a"),),
+        second_pass=lambda _source: (_draft("second", "model-b"),),
+        adjudication_pass=lambda *_args: pytest.fail(
+            "agreeing annotations must not be adjudicated"
+        ),
+        config=_config(),
+        max_workers=2,
+    )
+
+    assert tuple(source.source_id for source in benchmark.sources) == (
+        "fixture-policy-v1",
+        "fixture-policy-v2",
+    )
+
+
+def test_generation_rejects_non_positive_worker_count():
+    with pytest.raises(ValueError, match="max_workers"):
+        generate_frozen_benchmark(
+            sources=(_source(),),
+            first_pass=lambda _source: (_draft("first", "model-a"),),
+            second_pass=lambda _source: (_draft("second", "model-b"),),
+            adjudication_pass=lambda *_args: pytest.fail("must not run"),
+            config=_config(),
+            max_workers=0,
+        )
+
+
 def test_generation_adjudicates_even_when_both_passes_return_same_uncertain_label():
     source = _source()
     uncertain_first = AnnotationDraft(

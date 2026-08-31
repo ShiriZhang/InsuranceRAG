@@ -9,7 +9,7 @@
   },
   "prompt_versions": {
     "annotator": "silver-evidence-annotator/v1.0.0",
-    "adjudicator": "silver-evidence-adjudicator/v1.0.0"
+    "adjudicator": "silver-evidence-adjudicator/v1.1.0"
   },
   "passes": {
     "annotator_a": {
@@ -33,7 +33,7 @@
     "adjudicator": {
       "annotator_id": "deepseek-adjudicator-c",
       "model_id": "deepseek-v4-flash",
-      "prompt_version": "silver-evidence-adjudicator/v1.0.0",
+      "prompt_version": "silver-evidence-adjudicator/v1.1.0",
       "schema_version": "silver-evidence-schema/v1.0.0",
       "reasoning_effort": "high",
       "max_output_tokens": 16384,

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from threading import Lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,9 +71,17 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="Generate a resumable pilot for the first N frozen sources; release gates are not run.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Maximum number of policy sources processed concurrently.",
+    )
     args = parser.parse_args(argv)
     if args.source_limit is not None and args.source_limit <= 0:
         parser.error("--source-limit must be positive")
+    if args.workers <= 0:
+        parser.error("--workers must be positive")
 
     config_path = _absolute(args.config)
     documents_dir = _absolute(args.documents)
@@ -113,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8"
     )
     adjudicator_prompt = (
-        ROOT / "prompts" / "silver_evidence_adjudicator_v1.md"
+        ROOT / "prompts" / "silver_evidence_adjudicator_v1_1.md"
     ).read_text(encoding="utf-8")
     schema_record = json.loads(
         (ROOT / "schemas" / "silver_evidence_v1.json").read_text(encoding="utf-8")
@@ -179,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         second_pass=_with_progress("annotator_b", second_pass, len(sources)),
         adjudication_pass=adjudicator,
         config=config.benchmark_config(),
+        max_workers=args.workers,
     )
 
     runtime = {
@@ -191,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         "source_count": len(sources),
         "case_count": len(benchmark.cases),
         "checkpoint_dir": checkpoint_dir.relative_to(ROOT).as_posix(),
+        "max_workers": args.workers,
     }
     if args.source_limit is not None:
         write_json_atomic(
@@ -224,12 +235,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def _with_progress(name, annotation_pass, total):
     completed = 0
+    lock = Lock()
 
     def run(source):
         nonlocal completed
         result = annotation_pass(source)
-        completed += 1
-        print(f"{name}: {completed}/{total} sources ({source.source_name})", flush=True)
+        with lock:
+            completed += 1
+            progress = completed
+        print(f"{name}: {progress}/{total} sources ({source.source_name})", flush=True)
         return result
 
     return run

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
@@ -352,12 +353,16 @@ def generate_frozen_benchmark(
     second_pass: AnnotationPass,
     adjudication_pass: AdjudicationPass,
     config: BenchmarkConfig,
+    max_workers: int = 1,
 ) -> FrozenBenchmark:
+    if max_workers <= 0:
+        raise ValueError("max_workers must be positive.")
     annotation_pairs: dict[
         str, tuple[tuple[AnnotationDraft, AnnotationDraft], ...]
     ] = {}
     adjudications: dict[tuple[str, int], AnnotationDraft] = {}
-    for source in sources:
+
+    def process_source(source: BenchmarkSource):
         _validate_approved_source(source)
         first_annotations = first_pass(source)
         second_annotations = second_pass(source)
@@ -366,16 +371,34 @@ def generate_frozen_benchmark(
                 "Independent annotation passes must return the same number of cases."
             )
         pairs = tuple(zip(first_annotations, second_annotations))
-        annotation_pairs[source.source_id] = pairs
+        source_adjudications = []
         for case_index, (first, second) in enumerate(pairs):
             if (
                 first.annotation_uncertain
                 or second.annotation_uncertain
                 or _annotation_label(first) != _annotation_label(second)
             ):
-                adjudications[(source.source_id, case_index)] = adjudication_pass(
-                    source, first, second
+                source_adjudications.append(
+                    (
+                        case_index,
+                        adjudication_pass(source, first, second),
+                    )
                 )
+        return source.source_id, pairs, tuple(source_adjudications)
+
+    if max_workers == 1:
+        results = map(process_source, sources)
+        for source_id, pairs, source_adjudications in results:
+            annotation_pairs[source_id] = pairs
+            for case_index, adjudication in source_adjudications:
+                adjudications[(source_id, case_index)] = adjudication
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(process_source, sources)
+            for source_id, pairs, source_adjudications in results:
+                annotation_pairs[source_id] = pairs
+                for case_index, adjudication in source_adjudications:
+                    adjudications[(source_id, case_index)] = adjudication
     return build_frozen_benchmark(
         sources=sources,
         annotation_pairs=annotation_pairs,

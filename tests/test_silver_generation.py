@@ -26,6 +26,11 @@ def test_committed_silver_generation_config_freezes_issue_16_decisions():
     assert config.annotator_a.model_id == "deepseek-v4-flash"
     assert config.annotator_b.model_id == "deepseek-v4-flash"
     assert config.adjudicator.model_id == "deepseek-v4-flash"
+    assert (
+        config.adjudicator_prompt_version
+        == "silver-evidence-adjudicator/v1.1.0"
+    )
+    assert config.adjudicator.prompt_version == config.adjudicator_prompt_version
     assert config.annotator_a.reasoning_effort == "low"
     assert config.annotator_b.reasoning_effort == "none"
     assert config.adjudicator.reasoning_effort == "high"

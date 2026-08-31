@@ -43,6 +43,7 @@ class ApprovedCorpusInventory:
 class EvidenceCasePlan:
     split_by_source_id: dict[str, DatasetSplit]
     source_index_by_id: dict[str, int]
+    strata_by_source_id: dict[str, tuple[str, ...]]
     development_cases_per_source: int
     held_out_cases_per_source: int
 
@@ -63,9 +64,7 @@ class EvidenceCasePlan:
         requests = []
         for local_index in range(case_count):
             global_index = first_global_index + local_index
-            stratum = REQUIRED_EVIDENCE_STRATA[
-                global_index % len(REQUIRED_EVIDENCE_STRATA)
-            ]
+            stratum = self.strata_by_source_id[source.source_id][local_index]
             requests.append(
                 EvidenceCaseRequest(
                     slot_id=(
@@ -223,20 +222,116 @@ def build_evidence_case_plan(
         raise ValueError("Evidence case counts per source must be positive.")
     split_by_source_id: dict[str, DatasetSplit] = {}
     source_index_by_id: dict[str, int] = {}
+    strata_by_source_id: dict[str, tuple[str, ...]] = {}
     for split in DatasetSplit:
         sources = sorted(
             document_split.sources_for(split),
             key=lambda source: source.source_id,
         )
+        case_count = (
+            development_cases_per_source
+            if split is DatasetSplit.DEVELOPMENT
+            else held_out_cases_per_source
+        )
         for source_index, source in enumerate(sources):
             split_by_source_id[source.source_id] = split
             source_index_by_id[source.source_id] = source_index
+            first_global_index = source_index * case_count
+            strata_by_source_id[source.source_id] = tuple(
+                REQUIRED_EVIDENCE_STRATA[
+                    (first_global_index + local_index)
+                    % len(REQUIRED_EVIDENCE_STRATA)
+                ]
+                for local_index in range(case_count)
+            )
+        if split is DatasetSplit.HELD_OUT:
+            _prioritize_cross_page_sources(sources, strata_by_source_id)
     return EvidenceCasePlan(
         split_by_source_id=split_by_source_id,
         source_index_by_id=source_index_by_id,
+        strata_by_source_id=strata_by_source_id,
         development_cases_per_source=development_cases_per_source,
         held_out_cases_per_source=held_out_cases_per_source,
     )
+
+
+def _prioritize_cross_page_sources(
+    sources: tuple[BenchmarkSource, ...],
+    strata_by_source_id: dict[str, tuple[str, ...]],
+) -> None:
+    cross_page = "cross_page_clause"
+    assigned = {
+        source.source_id
+        for source in sources
+        if cross_page in strata_by_source_id[source.source_id]
+    }
+    ranked = sorted(
+        sources,
+        key=lambda source: (
+            -_best_cross_page_continuity_score(source.pages),
+            source.source_id,
+        ),
+    )
+    preferred = {source.source_id for source in ranked[: len(assigned)]}
+    additions = [source_id for source_id in preferred if source_id not in assigned]
+    removals = [source_id for source_id in assigned if source_id not in preferred]
+    additions.sort()
+    removals.sort()
+    replacement_priority = {
+        "complete_short_clause": 0,
+        "single_sentence": 1,
+        "adjacent_or_lexically_similar_hard_negative": 2,
+        "internally_split_clause": 3,
+        "rule_plus_exception": 4,
+        "multi_sentence_conditions_outcomes": 5,
+    }
+
+    while removals:
+        swapped = False
+        for removal_index, removal_id in enumerate(removals):
+            removal_strata = list(strata_by_source_id[removal_id])
+            cross_index = removal_strata.index(cross_page)
+            for addition_index, addition_id in enumerate(additions):
+                addition_strata = list(strata_by_source_id[addition_id])
+                candidates = sorted(
+                    (
+                        index
+                        for index, stratum in enumerate(addition_strata)
+                        if stratum not in removal_strata
+                    ),
+                    key=lambda index: (
+                        replacement_priority.get(addition_strata[index], 99),
+                        index,
+                    ),
+                )
+                if not candidates:
+                    continue
+                addition_slot = candidates[0]
+                replacement = addition_strata[addition_slot]
+                removal_strata[cross_index] = replacement
+                addition_strata[addition_slot] = cross_page
+                strata_by_source_id[removal_id] = tuple(removal_strata)
+                strata_by_source_id[addition_id] = tuple(addition_strata)
+                removals.pop(removal_index)
+                additions.pop(addition_index)
+                swapped = True
+                break
+            if swapped:
+                break
+        if not swapped:
+            raise ValueError(
+                "Unable to preserve balanced strata while ranking cross-page cases."
+            )
+
+
+def _best_cross_page_continuity_score(
+    pages: tuple[DocumentPage, ...],
+) -> int:
+    scores = [
+        _cross_page_continuity_score(left.text[-700:], right.text[:700])
+        for left, right in zip(pages, pages[1:])
+    ]
+    return max(scores, default=-100)
 
 
 def build_annotation_source_window(
@@ -253,6 +348,20 @@ def build_annotation_source_window(
         raise ValueError("Annotation window slot index is outside the slot count.")
     if max_chars <= 0:
         raise ValueError("Annotation window max_chars must be positive.")
+    if stratum == "cross_page_clause":
+        boundary_windows = _cross_page_boundary_windows(source.pages, max_chars)
+        if boundary_windows:
+            if slot_count == 1:
+                window_index = 0
+            else:
+                window_index = round(
+                    slot_index * (len(boundary_windows) - 1) / (slot_count - 1)
+                )
+            return AnnotationSourceWindow(
+                original_source=source,
+                window_id=slot_id,
+                pages=boundary_windows[window_index],
+            )
     windows: list[tuple] = []
     current = []
     current_chars = 0
@@ -285,7 +394,10 @@ def build_annotation_source_window(
         ]
         if cross_page_windows:
             windows = cross_page_windows
-    if slot_count == 1:
+    if stratum == "multi_sentence_conditions_outcomes":
+        windows.sort(key=lambda window: -_multi_sentence_window_score(window))
+        window_index = 0
+    elif slot_count == 1:
         window_index = len(windows) // 2
     else:
         window_index = round(slot_index * (len(windows) - 1) / (slot_count - 1))
@@ -294,6 +406,113 @@ def build_annotation_source_window(
         window_id=slot_id,
         pages=windows[window_index],
     )
+
+
+def _cross_page_boundary_windows(
+    pages: tuple[DocumentPage, ...],
+    max_chars: int,
+) -> tuple[tuple[DocumentPage, DocumentPage], ...]:
+    if max_chars < 2:
+        return ()
+    left_budget = max_chars // 2
+    right_budget = max_chars - left_budget
+    ranked_windows = []
+    for boundary_index, (left, right) in enumerate(zip(pages, pages[1:])):
+        left_text = left.text[-left_budget:]
+        right_text = right.text[:right_budget]
+        if not left_text or not right_text:
+            continue
+        window = (
+            type(left)(
+                page_number=left.page_number,
+                text=left_text,
+                extraction_method=left.extraction_method,
+            ),
+            type(right)(
+                page_number=right.page_number,
+                text=right_text,
+                extraction_method=right.extraction_method,
+            ),
+        )
+        ranked_windows.append(
+            (
+                -_cross_page_continuity_score(left_text, right_text),
+                boundary_index,
+                window,
+            )
+        )
+    ranked_windows.sort(key=lambda item: (item[0], item[1]))
+    return tuple(item[2] for item in ranked_windows)
+
+
+def _cross_page_continuity_score(left_text: str, right_text: str) -> int:
+    left = " ".join(left_text.split())
+    right = " ".join(right_text.split())
+    if not left or not right:
+        return -100
+    score = 0
+    if left.endswith(("，", "、", "：", ",", ":", "（", "(")):
+        score += 8
+    elif not left.endswith(("。", "！", "？", "；", ".", "!", "?", ";")):
+        score += 3
+    continuation_prefixes = (
+        "并",
+        "且",
+        "以及",
+        "或者",
+        "或",
+        "但",
+        "除",
+        "若",
+        "如",
+        "则",
+        "同时",
+        "由",
+        "给付",
+    )
+    if right.startswith(continuation_prefixes):
+        score += 6
+    if right.startswith(("，", "、", "；", ",", ";", ")", "）")):
+        score += 4
+    left_fragment = _boundary_fragment(left, from_end=True)
+    right_fragment = _boundary_fragment(right, from_end=False)
+    score += min(len(left_fragment) // 12, 5)
+    score += min(len(right_fragment) // 12, 5)
+    if len(left_fragment) < 6:
+        score -= 8
+    if len(right_fragment) < 6:
+        score -= 4
+    if right.startswith("目录") or (
+        right.startswith("第") and "条" in right[:16]
+    ):
+        score -= 6
+    return score
+
+
+def _boundary_fragment(text: str, *, from_end: bool) -> str:
+    terminal = "。！？；.!?;"
+    if from_end:
+        boundary = max((text.rfind(mark) for mark in terminal), default=-1)
+        return text[boundary + 1 :].strip()
+    indexes = [text.find(mark) for mark in terminal if text.find(mark) >= 0]
+    boundary = min(indexes, default=len(text))
+    return text[:boundary].strip()
+
+
+def _multi_sentence_window_score(window: tuple[DocumentPage, ...]) -> int:
+    text = " ".join(" ".join(page.text.split()) for page in window)
+    sentence_count = sum(text.count(mark) for mark in "。！？；.!?;")
+    condition_count = sum(
+        text.count(marker)
+        for marker in ("如果", "若", "当", "条件", "等待期", "情形", "情况下")
+    )
+    outcome_count = sum(
+        text.count(marker)
+        for marker in ("给付", "承担", "赔付", "豁免", "终止", "不承担")
+    )
+    return min(sentence_count, 8) * 2 + min(condition_count, 5) * 3 + min(
+        outcome_count, 5
+    ) * 3
 
 
 def build_adjudication_source_window(
@@ -305,6 +524,12 @@ def build_adjudication_source_window(
     max_chars: int,
     fallback_window: AnnotationSourceWindow | None = None,
 ) -> AnnotationSourceWindow:
+    if fallback_window is not None:
+        return AnnotationSourceWindow(
+            original_source=source,
+            window_id=work_item_id,
+            pages=fallback_window.pages,
+        )
     referenced_pages = {
         span.page_number for span in (*first_spans, *second_spans)
     }
@@ -343,12 +568,6 @@ def build_adjudication_source_window(
             original_source=source,
             window_id=work_item_id,
             pages=tuple(segments),
-        )
-    if fallback_window is not None:
-        return AnnotationSourceWindow(
-            original_source=source,
-            window_id=work_item_id,
-            pages=fallback_window.pages,
         )
     return build_annotation_source_window(
         source,

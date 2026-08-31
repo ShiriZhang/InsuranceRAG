@@ -158,6 +158,59 @@ def test_case_plan_balances_required_strata_and_uses_more_held_out_cases():
     )
 
 
+def test_case_plan_assigns_held_out_cross_page_cases_to_best_boundaries():
+    sources = tuple(
+        BenchmarkSource(
+            source_id=f"ranked-source-{index}",
+            source_name=f"ranked-source-{index}.pdf",
+            approval=SourceApproval.PROJECT_OWNED,
+            approval_reference="repository test fixture",
+            insurer_family=f"ranked-insurer-{index}",
+            product_family=f"ranked-product-{index}",
+            pages=(
+                (
+                    DocumentPage(1, "本公司承担保险责任，", "text"),
+                    DocumentPage(2, "并按约定给付保险金。", "text"),
+                )
+                if index < 5
+                else (DocumentPage(1, "完整条款。", "text"),)
+            ),
+        )
+        for index in range(8)
+    )
+    frozen = freeze_document_split(
+        version="ranked-split-v1",
+        sources=sources,
+        assignments=tuple(
+            DocumentSplitAssignment(
+                source_id=source.source_id,
+                split=(
+                    DatasetSplit.DEVELOPMENT
+                    if source.source_id == "ranked-source-7"
+                    else DatasetSplit.HELD_OUT
+                ),
+                near_duplicate_family=source.product_family,
+            )
+            for source in sources
+        ),
+    )
+
+    plan = build_evidence_case_plan(
+        frozen,
+        development_cases_per_source=3,
+        held_out_cases_per_source=5,
+    )
+
+    cross_page_source_ids = {
+        source.source_id
+        for source in frozen.sources_for(DatasetSplit.HELD_OUT)
+        if any(request.stratum == "cross_page_clause" for request in plan(source))
+    }
+    assert cross_page_source_ids == {
+        f"ranked-source-{index}" for index in range(5)
+    }
+
+
 def test_annotation_windows_are_deterministic_complete_pages():
     source = BenchmarkSource(
         source_id="source-a",
@@ -224,6 +277,121 @@ def test_annotation_window_segments_long_pages_without_losing_source_text():
     assert all(window.authoritative_pages == source.pages for window in windows)
 
 
+def test_cross_page_window_uses_adjacent_page_boundary_within_budget():
+    source = BenchmarkSource(
+        source_id="source-cross-page",
+        source_name="source-cross-page.pdf",
+        approval=SourceApproval.PROJECT_OWNED,
+        approval_reference="repository test fixture",
+        insurer_family="insurer-a",
+        product_family="product-a",
+        pages=(
+            DocumentPage(1, "甲" * 60 + "第一页结尾", "text"),
+            DocumentPage(2, "第二页开头" + "乙" * 60, "text"),
+        ),
+    )
+
+    window = build_annotation_source_window(
+        source,
+        slot_id="cross-page-slot",
+        slot_index=0,
+        slot_count=1,
+        max_chars=40,
+        stratum="cross_page_clause",
+    )
+
+    assert [page.page_number for page in window.pages] == [1, 2]
+    assert window.pages[0].text.endswith("第一页结尾")
+    assert window.pages[1].text.startswith("第二页开头")
+    assert sum(len(page.text) for page in window.pages) <= 40
+    assert window.authoritative_pages == source.pages
+
+
+def test_cross_page_window_prefers_boundary_with_clause_continuation():
+    source = BenchmarkSource(
+        source_id="source-cross-page-ranked",
+        source_name="source-cross-page-ranked.pdf",
+        approval=SourceApproval.PROJECT_OWNED,
+        approval_reference="repository test fixture",
+        insurer_family="insurer-a",
+        product_family="product-a",
+        pages=(
+            DocumentPage(1, "第一条 本公司承担保险责任，", "text"),
+            DocumentPage(2, "并按约定给付保险金。本页结束。", "text"),
+            DocumentPage(3, "第三条 责任免除。", "text"),
+        ),
+    )
+
+    window = build_annotation_source_window(
+        source,
+        slot_id="cross-page-ranked-slot",
+        slot_index=0,
+        slot_count=1,
+        max_chars=80,
+        stratum="cross_page_clause",
+    )
+
+    assert [page.page_number for page in window.pages] == [1, 2]
+
+
+def test_cross_page_window_prefers_substantive_continuation_over_short_header():
+    source = BenchmarkSource(
+        source_id="source-cross-page-substantive",
+        source_name="source-cross-page-substantive.pdf",
+        approval=SourceApproval.PROJECT_OWNED,
+        approval_reference="repository test fixture",
+        insurer_family="insurer-a",
+        product_family="product-a",
+        pages=(
+            DocumentPage(1, "责任，", "text"),
+            DocumentPage(2, "并给付。本公司在被保险人确诊约定疾病且满足等待期要求后，", "text"),
+            DocumentPage(3, "按照基本保险金额给付重大疾病保险金。", "text"),
+        ),
+    )
+
+    window = build_annotation_source_window(
+        source,
+        slot_id="cross-page-substantive-slot",
+        slot_index=0,
+        slot_count=1,
+        max_chars=120,
+        stratum="cross_page_clause",
+    )
+
+    assert [page.page_number for page in window.pages] == [2, 3]
+
+
+def test_multi_sentence_window_prefers_conditions_and_outcomes():
+    source = BenchmarkSource(
+        source_id="source-multi-sentence-ranked",
+        source_name="source-multi-sentence-ranked.pdf",
+        approval=SourceApproval.PROJECT_OWNED,
+        approval_reference="repository test fixture",
+        insurer_family="insurer-a",
+        product_family="product-a",
+        pages=(
+            DocumentPage(1, "产品名称。公司名称。", "text"),
+            DocumentPage(
+                2,
+                "若被保险人在等待期后确诊重大疾病，本公司承担保险责任。满足约定条件时，本公司给付重大疾病保险金。",
+                "text",
+            ),
+            DocumentPage(3, "释义。附表。", "text"),
+        ),
+    )
+
+    window = build_annotation_source_window(
+        source,
+        slot_id="multi-sentence-slot",
+        slot_index=0,
+        slot_count=3,
+        max_chars=55,
+        stratum="multi_sentence_conditions_outcomes",
+    )
+
+    assert [page.page_number for page in window.pages] == [2]
+
+
 def test_adjudication_window_keeps_disputed_spans_when_full_pages_are_too_large():
     source = BenchmarkSource(
         source_id="source-dispute",
@@ -251,3 +419,38 @@ def test_adjudication_window_keeps_disputed_spans_when_full_pages_are_too_large(
     combined = "".join(page.text for page in window.pages)
     assert "第一证据" in combined
     assert "第二证据" in combined
+
+
+def test_adjudication_window_reuses_the_annotation_window_when_available():
+    source = BenchmarkSource(
+        source_id="source-adjudication-fallback",
+        source_name="source-adjudication-fallback.pdf",
+        approval=SourceApproval.PROJECT_OWNED,
+        approval_reference="repository test fixture",
+        insurer_family="insurer-a",
+        product_family="product-a",
+        pages=(
+            DocumentPage(1, "第一页末尾的条件，", "text"),
+            DocumentPage(2, "并在第二页给付保险金。", "text"),
+        ),
+    )
+    fallback = build_annotation_source_window(
+        source,
+        slot_id="slot-1",
+        slot_index=0,
+        slot_count=1,
+        max_chars=80,
+        stratum="cross_page_clause",
+    )
+
+    window = build_adjudication_source_window(
+        source,
+        (EvidenceSpan(1, 0, 9, "第一页末尾的条件，"),),
+        (),
+        work_item_id="adjudication",
+        max_chars=80,
+        fallback_window=fallback,
+    )
+
+    assert window.pages == fallback.pages
+    assert [page.page_number for page in window.pages] == [1, 2]

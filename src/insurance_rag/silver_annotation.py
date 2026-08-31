@@ -56,6 +56,7 @@ class AnnotationCompletion:
     incomplete_reason: str | None = None
     request_timestamp: str | None = None
     retry_count: int = 0
+    semantic_validation_exhausted: bool = False
 
 
 class AnnotationClient(Protocol):
@@ -64,6 +65,14 @@ class AnnotationClient(Protocol):
 
 class RetryableAnnotationResponseError(ValueError):
     """The provider returned content that may succeed on a fresh request."""
+
+
+class RetryableSemanticAnnotationResponseError(RetryableAnnotationResponseError):
+    """The JSON is usable, but a claimed exact label fails local evidence rules."""
+
+
+class RetryableIncompleteAnnotationResponseError(RetryableAnnotationResponseError):
+    """The provider exhausted output tokens before returning JSON."""
 
 
 class OpenAIDeepSeekResponsesClient:
@@ -187,30 +196,46 @@ class AnnotationPass:
             if self._checkpoint_store is not None
             else None
         )
+        expected_slots = {request.slot_id for request in requests}
+        if completion is not None and completion.semantic_validation_exhausted:
+            case_by_slot = _annotation_cases(completion, expected_slots)
+        elif completion is not None:
+            try:
+                case_by_slot = _validated_annotation_cases(
+                    completion,
+                    expected_slots=expected_slots,
+                    source=source,
+                    requests=requests,
+                )
+            except RetryableAnnotationResponseError:
+                completion = None
         if completion is None:
             completion = _create_with_retries(
-                self._client, self._config, completion_request
+                self._client,
+                self._config,
+                completion_request,
+                validate=lambda candidate: _validated_annotation_cases(
+                    candidate,
+                    expected_slots=expected_slots,
+                    source=source,
+                    requests=requests,
+                ),
             )
-            if self._checkpoint_store is not None:
+            case_by_slot = (
+                _annotation_cases(completion, expected_slots)
+                if completion.content.strip()
+                else {
+                    request.slot_id: _uncertain_raw_case(request)
+                    for request in requests
+                }
+            )
+            if self._checkpoint_store is not None and completion.content.strip():
                 self._checkpoint_store.save(
                     annotator_id=self._config.annotator_id,
                     source_id=source.source_id,
                     request_sha256=request_sha256,
                     completion=completion,
                 )
-        payload = json.loads(completion.content)
-        raw_cases = payload.get("cases")
-        if not isinstance(raw_cases, list):
-            raise ValueError("Annotation response requires a cases array.")
-        case_by_slot = {
-            str(case.get("slot_id")): case
-            for case in raw_cases
-            if isinstance(case, dict)
-        }
-        expected_slots = {request.slot_id for request in requests}
-        if set(case_by_slot) != expected_slots:
-            raise ValueError("Annotation response slots do not match the request.")
-
         stable_metadata = _annotation_metadata(
             self._config, self._prompt_text, self._response_schema
         )
@@ -296,27 +321,40 @@ class AdjudicationPass:
             if self._checkpoint_store is not None
             else None
         )
+        if completion is not None and completion.semantic_validation_exhausted:
+            raw_case = _adjudication_case(completion)
+        elif completion is not None:
+            try:
+                raw_case = _validated_adjudication_case(
+                    completion,
+                    source=source,
+                    request=request,
+                )
+            except RetryableAnnotationResponseError:
+                completion = None
         if completion is None:
             completion = _create_with_retries(
-                self._client, self._config, completion_request
+                self._client,
+                self._config,
+                completion_request,
+                validate=lambda candidate: _validated_adjudication_case(
+                    candidate,
+                    source=source,
+                    request=request,
+                ),
             )
-            if self._checkpoint_store is not None:
+            raw_case = (
+                _adjudication_case(completion)
+                if completion.content.strip()
+                else _uncertain_raw_case(request)
+            )
+            if self._checkpoint_store is not None and completion.content.strip():
                 self._checkpoint_store.save(
                     annotator_id=self._config.annotator_id,
                     source_id=work_item_id,
                     request_sha256=request_sha256,
                     completion=completion,
                 )
-        payload = json.loads(completion.content)
-        raw_cases = payload.get("cases")
-        if not isinstance(raw_cases, list) or len(raw_cases) != 1:
-            raise ValueError("Adjudication response requires exactly one case.")
-        raw_case = raw_cases[0]
-        if (
-            not isinstance(raw_case, dict)
-            or raw_case.get("slot_id") != "adjudication"
-        ):
-            raise ValueError("Adjudication response has an invalid slot.")
         metadata = _annotation_metadata(
             self._config, self._prompt_text, self._response_schema
         )
@@ -340,18 +378,39 @@ def _create_with_retries(
     client: AnnotationClient,
     config: AnnotationPassConfig,
     completion_request: dict[str, object],
+    validate: Callable[[AnnotationCompletion], object] | None = None,
 ) -> AnnotationCompletion:
     for retry_count in range(config.max_retries + 1):
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
             completion = client.create_completion(**completion_request)
             _validate_completion_content(completion)
+            if validate is not None:
+                validate(completion)
             return replace(
                 completion,
                 request_timestamp=timestamp,
                 retry_count=retry_count,
             )
         except Exception as error:
+            if retry_count >= config.max_retries and isinstance(
+                error, RetryableSemanticAnnotationResponseError
+            ):
+                return replace(
+                    completion,
+                    request_timestamp=timestamp,
+                    retry_count=retry_count,
+                    semantic_validation_exhausted=True,
+                )
+            if retry_count >= config.max_retries and isinstance(
+                error, RetryableAnnotationResponseError
+            ):
+                return replace(
+                    completion,
+                    content="",
+                    request_timestamp=timestamp,
+                    retry_count=retry_count,
+                )
             if retry_count >= config.max_retries or not _is_retryable(error):
                 raise
             time.sleep(_retry_delay_seconds(error, retry_count))
@@ -450,6 +509,8 @@ def _draft_from_case(
         authoritative_pages,
         raw_case.get("hard_negative_spans"),
     )
+    if request.hard_negative_category is None:
+        hard_negative_spans = ()
     invalid = (
         not question
         or not evidence_spans
@@ -645,7 +706,7 @@ def _is_retryable(error: Exception) -> bool:
 def _validate_completion_content(completion: AnnotationCompletion) -> None:
     if not completion.content.strip():
         reason = completion.incomplete_reason or completion.response_status or "unknown"
-        raise RetryableAnnotationResponseError(
+        raise RetryableIncompleteAnnotationResponseError(
             "Annotation response returned empty JSON; "
             f"incomplete reason: {reason}. Increase max_output_tokens."
         )
@@ -658,6 +719,119 @@ def _validate_completion_content(completion: AnnotationCompletion) -> None:
     if not isinstance(payload, dict):
         raise RetryableAnnotationResponseError(
             "Annotation response JSON must be an object."
+        )
+
+
+def _annotation_cases(
+    completion: AnnotationCompletion,
+    expected_slots: set[str],
+) -> dict[str, Mapping[str, object]]:
+    payload = json.loads(completion.content)
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list):
+        raise RetryableAnnotationResponseError(
+            "Annotation response requires a cases array."
+        )
+    case_by_slot = {
+        str(case.get("slot_id")): case
+        for case in raw_cases
+        if isinstance(case, dict)
+    }
+    if len(expected_slots) == 1 and len(raw_cases) == 1 and len(case_by_slot) == 1:
+        requested_slot = next(iter(expected_slots))
+        return {requested_slot: raw_cases[0]}
+    if set(case_by_slot) != expected_slots:
+        raise RetryableAnnotationResponseError(
+            "Annotation response slots do not match the request."
+        )
+    return case_by_slot
+
+
+def _validated_annotation_cases(
+    completion: AnnotationCompletion,
+    *,
+    expected_slots: set[str],
+    source: BenchmarkSource,
+    requests: tuple[EvidenceCaseRequest, ...],
+) -> dict[str, Mapping[str, object]]:
+    case_by_slot = _annotation_cases(completion, expected_slots)
+    for request in requests:
+        _validate_non_uncertain_case(source, request, case_by_slot[request.slot_id])
+    return case_by_slot
+
+
+def _adjudication_case(
+    completion: AnnotationCompletion,
+) -> Mapping[str, object]:
+    payload = json.loads(completion.content)
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list) or len(raw_cases) != 1:
+        raise RetryableAnnotationResponseError(
+            "Adjudication response requires exactly one case."
+        )
+    raw_case = raw_cases[0]
+    if not isinstance(raw_case, dict):
+        raise RetryableAnnotationResponseError(
+            "Adjudication response has an invalid slot."
+        )
+    return raw_case
+
+
+def _validated_adjudication_case(
+    completion: AnnotationCompletion,
+    *,
+    source: BenchmarkSource,
+    request: EvidenceCaseRequest,
+) -> Mapping[str, object]:
+    raw_case = _adjudication_case(completion)
+    _validate_non_uncertain_case(source, request, raw_case)
+    return raw_case
+
+
+def _uncertain_raw_case(request: EvidenceCaseRequest) -> Mapping[str, object]:
+    return {
+        "slot_id": request.slot_id,
+        "question": request.question or f"annotation_uncertain:{request.slot_id}",
+        "evidence_spans": [],
+        "hard_negative_spans": [],
+        "annotation_uncertain": True,
+    }
+
+
+def _validate_non_uncertain_case(
+    source: BenchmarkSource,
+    request: EvidenceCaseRequest,
+    raw_case: Mapping[str, object],
+) -> None:
+    if raw_case.get("annotation_uncertain") is True:
+        return
+    question = request.question.strip() if request.question else str(
+        raw_case.get("question", "")
+    ).strip()
+    authoritative_pages = getattr(source, "authoritative_pages", source.pages)
+    evidence_spans = _map_response_spans(
+        authoritative_pages,
+        raw_case.get("evidence_spans"),
+    )
+    hard_negative_spans = _map_response_spans(
+        authoritative_pages,
+        raw_case.get("hard_negative_spans"),
+    )
+    invalid = (
+        not question
+        or not evidence_spans
+        or (
+            request.stratum == "cross_page_clause"
+            and len({span.page_number for span in evidence_spans}) < 2
+        )
+        or (
+            request.hard_negative_category is not None
+            and not hard_negative_spans
+        )
+    )
+    if invalid:
+        raise RetryableSemanticAnnotationResponseError(
+            "Non-uncertain annotation did not satisfy exact evidence constraints."
         )
 
 
