@@ -835,6 +835,8 @@ def _run_strategy(
         "parseable_policies_indexed": True,
     }
     for source in benchmark.sources:
+        if not any(page.text.strip() for page in source.pages):
+            continue
         page_by_number = {page.page_number: page for page in source.pages}
         started = time.perf_counter()
         chunks = chunk_pages(

@@ -3,7 +3,10 @@ from dataclasses import replace
 import pytest
 
 from insurance_rag.clause_v2_selection import (
+    ClauseV2NoSelectionManifest,
+    DevelopmentSelection,
     DevelopmentTrial,
+    render_development_selection_markdown,
     run_development_selection,
     select_development_trial,
 )
@@ -180,3 +183,26 @@ def test_every_trial_requires_exactly_the_three_preregistered_families():
 
     with pytest.raises(ValueError, match="exactly the three"):
         select_development_trial((incomplete,))
+
+
+def test_no_eligible_candidate_is_recorded_without_forcing_a_selection():
+    trial = _trial(zero_improvements=0, semantic_improvements=0)
+    manifest = ClauseV2NoSelectionManifest(
+        benchmark_version="development-v1",
+        development_benchmark_manifest_sha256="development-manifest",
+        document_split_manifest_sha256="split-manifest",
+        evaluated_size_grid=((900, 1200),),
+        evaluated_context_token_budgets=(4000,),
+    )
+    selection = DevelopmentSelection(
+        trials=(trial,),
+        manifest=manifest,
+        bootstrap_samples=100,
+    )
+
+    markdown = render_development_selection_markdown(selection)
+
+    assert manifest.to_manifest()["strategy"] is None
+    assert manifest.to_manifest()["selection_status"] == "no_eligible_candidate"
+    assert "no configuration was selected or promoted" in markdown
+    assert "FAIL" in markdown

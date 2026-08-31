@@ -306,6 +306,43 @@ def test_uncertain_cases_are_excluded_from_primary_scores_but_reported():
     assert report.strategy_results[0].scored_cases == 0
 
 
+def test_unparseable_source_with_only_uncertain_cases_is_not_indexed():
+    source = _source()
+    first = _draft("first", "model-a")
+    second = _draft("second", "model-b", quote="第六条 等待期", start_char=0)
+    third = replace(
+        first,
+        evidence_spans=(),
+        hard_negative_category=None,
+        hard_negative_spans=(),
+        metadata=_metadata("third", "model-c"),
+        annotation_uncertain=True,
+    )
+    benchmark = build_frozen_benchmark(
+        sources=(source,),
+        annotation_pairs={source.source_id: ((first, second),)},
+        adjudications={(source.source_id, 0): third},
+        config=_config(),
+    )
+    empty_source = replace(
+        source,
+        pages=tuple(replace(page, text="") for page in source.pages),
+    )
+
+    report = run_frozen_benchmark(
+        replace(benchmark, sources=(empty_source,)),
+        strategies=(StrategyConfig(name="legacy", chunking_strategy="legacy"),),
+        embedder=KeywordEmbedder(),
+        token_counter=CharacterTokenCounter(),
+    )
+
+    result = report.strategy_results[0]
+    assert result.scored_cases == 0
+    assert result.retrieval_unit_count == 0
+    assert result.embedding_tokens == 0
+    assert all(result.correctness_invariants.values())
+
+
 def test_changed_judge_or_retrieval_configuration_requires_new_frozen_version():
     source = _source()
     benchmark = build_frozen_benchmark(

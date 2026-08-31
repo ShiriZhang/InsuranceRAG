@@ -60,9 +60,34 @@ class ClauseV2SelectionManifest:
 
 
 @dataclass(frozen=True)
+class ClauseV2NoSelectionManifest:
+    benchmark_version: str
+    development_benchmark_manifest_sha256: str
+    document_split_manifest_sha256: str
+    evaluated_size_grid: tuple[tuple[int, int], ...]
+    evaluated_context_token_budgets: tuple[int, ...]
+    selection_status: str = "no_eligible_candidate"
+    strategy: None = None
+    reason: str = "No clause_v2 development candidate satisfies every promotion rule."
+    selection_rules_version: str = SELECTION_RULES_VERSION
+
+    def to_manifest(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class GuardrailEvaluation:
+    name: str
+    value: float | bool | None
+    requirement: str
+    passed: bool
+
+
+@dataclass(frozen=True)
 class DevelopmentSelection:
     trials: tuple[DevelopmentTrial, ...]
-    manifest: ClauseV2SelectionManifest
+    manifest: ClauseV2SelectionManifest | ClauseV2NoSelectionManifest
+    bootstrap_samples: int
 
 
 def run_development_selection(
@@ -129,11 +154,28 @@ def run_development_selection(
                 )
             )
 
-    selected_trial, selected_result = select_development_trial(
-        tuple(trials),
-        bootstrap_samples=bootstrap_samples,
-    )
     config = benchmark.config
+    try:
+        selected_trial, selected_result = select_development_trial(
+            tuple(trials),
+            bootstrap_samples=bootstrap_samples,
+        )
+    except ValueError as error:
+        if str(error) != (
+            "No clause_v2 development candidate satisfies every promotion rule."
+        ):
+            raise
+        return DevelopmentSelection(
+            trials=tuple(trials),
+            manifest=ClauseV2NoSelectionManifest(
+                benchmark_version=benchmark.version,
+                development_benchmark_manifest_sha256=benchmark.manifest_sha256,
+                document_split_manifest_sha256=document_split_manifest_sha256,
+                evaluated_size_grid=size_grid,
+                evaluated_context_token_budgets=context_token_budgets,
+            ),
+            bootstrap_samples=bootstrap_samples,
+        )
     return DevelopmentSelection(
         trials=tuple(trials),
         manifest=ClauseV2SelectionManifest(
@@ -169,6 +211,7 @@ def run_development_selection(
                 "context_token_budget": selected_trial.context_token_budget,
             },
         ),
+        bootstrap_samples=bootstrap_samples,
     )
 
 
@@ -218,24 +261,69 @@ def render_development_selection_markdown(
 ) -> str:
     sections = ["# Clause v2 development selection", ""]
     for trial in selection.trials:
+        results = {
+            result.strategy_name: result
+            for result in trial.report.strategy_results
+        }
         sections.extend(
             (
                 f"## target={trial.target_chars}, hard_max={trial.hard_max_chars}, budget={trial.context_token_budget}",
                 "",
+                "### Promotion guardrails",
+                "",
+                "| Candidate | Guardrail | Value | Requirement | Result |",
+                "| --- | --- | ---: | --- | --- |",
+            )
+        )
+        baseline = results["legacy"]
+        for candidate_name in (
+            "clause_v2_zero_body_overlap",
+            "clause_v2_preceding_semantic_unit",
+        ):
+            for evaluation in evaluate_guardrails(
+                baseline,
+                results[candidate_name],
+                bootstrap_samples=selection.bootstrap_samples,
+            ):
+                value = (
+                    "n/a"
+                    if evaluation.value is None
+                    else str(evaluation.value).lower()
+                    if isinstance(evaluation.value, bool)
+                    else f"{evaluation.value:.6f}"
+                )
+                sections.append(
+                    f"| `{candidate_name}` | `{evaluation.name}` | {value} | "
+                    f"{evaluation.requirement} | "
+                    f"{'PASS' if evaluation.passed else 'FAIL'} |"
+                )
+        sections.extend(
+            (
+                "",
                 render_benchmark_markdown(trial.report),
             )
         )
-    sections.extend(
-        (
-            "## Frozen selection",
-            "",
-            f"- Strategy: `{selection.manifest.strategy}`",
-            f"- Body overlap: `{selection.manifest.body_overlap_mode}`",
-            f"- Size: `{selection.manifest.target_chars}/{selection.manifest.hard_max_chars}` characters",
-            f"- Context budget: `{selection.manifest.context_token_budget}` tokens using `{selection.manifest.tokenizer_id}`",
-            "",
+    sections.extend(("## Frozen selection", ""))
+    if isinstance(selection.manifest, ClauseV2SelectionManifest):
+        sections.extend(
+            (
+                f"- Status: `selected`",
+                f"- Strategy: `{selection.manifest.strategy}`",
+                f"- Body overlap: `{selection.manifest.body_overlap_mode}`",
+                f"- Size: `{selection.manifest.target_chars}/{selection.manifest.hard_max_chars}` characters",
+                f"- Context budget: `{selection.manifest.context_token_budget}` tokens using `{selection.manifest.tokenizer_id}`",
+                "",
+            )
         )
-    )
+    else:
+        sections.extend(
+            (
+                f"- Status: `{selection.manifest.selection_status}`",
+                f"- Decision: no configuration was selected or promoted.",
+                f"- Reason: {selection.manifest.reason}",
+                "",
+            )
+        )
     return "\n".join(sections)
 
 
@@ -245,6 +333,22 @@ def _passes_guardrails(
     *,
     bootstrap_samples: int,
 ) -> bool:
+    return all(
+        evaluation.passed
+        for evaluation in evaluate_guardrails(
+            baseline,
+            candidate,
+            bootstrap_samples=bootstrap_samples,
+        )
+    )
+
+
+def evaluate_guardrails(
+    baseline: StrategyResult,
+    candidate: StrategyResult,
+    *,
+    bootstrap_samples: int,
+) -> tuple[GuardrailEvaluation, ...]:
     coverage_at_3 = paired_confidence_interval(
         baseline.case_coverage_at_3,
         candidate.case_coverage_at_3,
@@ -260,12 +364,20 @@ def _passes_guardrails(
         for index, strata in enumerate(candidate.case_strata)
         if BOUNDARY_SENSITIVE_STRATA.intersection(strata)
     )
-    if not boundary_indexes:
-        return False
-    boundary_coverage = paired_confidence_interval(
-        tuple(baseline.case_coverage_under_budget[index] for index in boundary_indexes),
-        tuple(candidate.case_coverage_under_budget[index] for index in boundary_indexes),
-        bootstrap_samples=bootstrap_samples,
+    boundary_coverage = (
+        paired_confidence_interval(
+            tuple(
+                baseline.case_coverage_under_budget[index]
+                for index in boundary_indexes
+            ),
+            tuple(
+                candidate.case_coverage_under_budget[index]
+                for index in boundary_indexes
+            ),
+            bootstrap_samples=bootstrap_samples,
+        )
+        if boundary_indexes
+        else None
     )
     hard_negative_indexes = tuple(
         index
@@ -274,39 +386,103 @@ def _passes_guardrails(
         )
         if applicable
     )
-    if not hard_negative_indexes:
-        return False
-    hard_negative = paired_confidence_interval(
-        tuple(
-            baseline.case_hard_negative_confusion[index]
-            for index in hard_negative_indexes
-        ),
-        tuple(
-            candidate.case_hard_negative_confusion[index]
-            for index in hard_negative_indexes
-        ),
-        bootstrap_samples=bootstrap_samples,
+    hard_negative = (
+        paired_confidence_interval(
+            tuple(
+                baseline.case_hard_negative_confusion[index]
+                for index in hard_negative_indexes
+            ),
+            tuple(
+                candidate.case_hard_negative_confusion[index]
+                for index in hard_negative_indexes
+            ),
+            bootstrap_samples=bootstrap_samples,
+        )
+        if hard_negative_indexes
+        else None
     )
     irrelevant_context = paired_confidence_interval(
         baseline.case_irrelevant_context_proportion,
         candidate.case_irrelevant_context_proportion,
         bootstrap_samples=bootstrap_samples,
     )
-    return all(
-        (
-            coverage_at_3.lower >= -0.01,
-            coverage_under_budget.lower >= -0.01,
-            boundary_coverage.estimate >= 0.05,
-            boundary_coverage.lower > 0,
-            hard_negative.upper <= 0.01,
-            irrelevant_context.upper <= 0.02,
-            candidate.embedding_tokens <= baseline.embedding_tokens * 1.15,
-            candidate.retrieval_unit_count <= baseline.retrieval_unit_count * 1.25,
-            candidate.p95_chunking_latency_seconds
-            <= baseline.p95_chunking_latency_seconds * 2,
-            all(candidate.correctness_invariants.values()),
-        )
+    embedding_ratio = _ratio(candidate.embedding_tokens, baseline.embedding_tokens)
+    retrieval_unit_ratio = _ratio(
+        candidate.retrieval_unit_count,
+        baseline.retrieval_unit_count,
     )
+    latency_ratio = _ratio(
+        candidate.p95_chunking_latency_seconds,
+        baseline.p95_chunking_latency_seconds,
+    )
+    return (
+        GuardrailEvaluation(
+            "coverage_at_3_ci_lower",
+            coverage_at_3.lower,
+            ">= -0.01",
+            coverage_at_3.lower >= -0.01,
+        ),
+        GuardrailEvaluation(
+            "coverage_budget_ci_lower",
+            coverage_under_budget.lower,
+            ">= -0.01",
+            coverage_under_budget.lower >= -0.01,
+        ),
+        GuardrailEvaluation(
+            "boundary_coverage_gain",
+            None if boundary_coverage is None else boundary_coverage.estimate,
+            ">= 0.05",
+            boundary_coverage is not None and boundary_coverage.estimate >= 0.05,
+        ),
+        GuardrailEvaluation(
+            "boundary_coverage_ci_lower",
+            None if boundary_coverage is None else boundary_coverage.lower,
+            "> 0",
+            boundary_coverage is not None and boundary_coverage.lower > 0,
+        ),
+        GuardrailEvaluation(
+            "hard_negative_ci_upper",
+            None if hard_negative is None else hard_negative.upper,
+            "<= 0.01",
+            hard_negative is not None and hard_negative.upper <= 0.01,
+        ),
+        GuardrailEvaluation(
+            "irrelevant_context_ci_upper",
+            irrelevant_context.upper,
+            "<= 0.02",
+            irrelevant_context.upper <= 0.02,
+        ),
+        GuardrailEvaluation(
+            "embedding_token_ratio",
+            embedding_ratio,
+            "<= 1.15",
+            embedding_ratio <= 1.15,
+        ),
+        GuardrailEvaluation(
+            "retrieval_unit_ratio",
+            retrieval_unit_ratio,
+            "<= 1.25",
+            retrieval_unit_ratio <= 1.25,
+        ),
+        GuardrailEvaluation(
+            "p95_chunking_latency_ratio",
+            latency_ratio,
+            "<= 2.0",
+            latency_ratio <= 2,
+        ),
+        GuardrailEvaluation(
+            "correctness_invariants",
+            all(candidate.correctness_invariants.values()),
+            "all true",
+            all(candidate.correctness_invariants.values()),
+        ),
+    )
+
+
+def _ratio(numerator: int | float, denominator: int | float) -> float:
+    if denominator == 0:
+        return 0.0 if numerator == 0 else float("inf")
+    return numerator / denominator
 
 
 def _candidate_selection_key(
