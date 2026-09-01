@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version as package_version
 from typing import Mapping
@@ -66,6 +67,7 @@ class ClauseV2NoSelectionManifest:
     document_split_manifest_sha256: str
     evaluated_size_grid: tuple[tuple[int, int], ...]
     evaluated_context_token_budgets: tuple[int, ...]
+    primary_context_token_budget: int
     selection_status: str = "no_eligible_candidate"
     strategy: None = None
     reason: str = "No clause_v2 development candidate satisfies every promotion rule."
@@ -96,6 +98,7 @@ def run_development_selection(
     dataset_split: DatasetSplit,
     size_grid: tuple[tuple[int, int], ...],
     context_token_budgets: tuple[int, ...],
+    primary_context_token_budget: int,
     document_split_manifest_sha256: str,
     embedder: Embedder,
     token_counter: TokenCounter,
@@ -107,6 +110,10 @@ def run_development_selection(
         )
     if not size_grid or not context_token_budgets:
         raise ValueError("Development size and context-budget grids cannot be empty.")
+    if primary_context_token_budget not in context_token_budgets:
+        raise ValueError(
+            "The primary context-token budget must be in the frozen budget grid."
+        )
 
     trials: list[DevelopmentTrial] = []
     for target_chars, hard_max_chars in size_grid:
@@ -158,6 +165,7 @@ def run_development_selection(
     try:
         selected_trial, selected_result = select_development_trial(
             tuple(trials),
+            primary_context_token_budget=primary_context_token_budget,
             bootstrap_samples=bootstrap_samples,
         )
     except ValueError as error:
@@ -173,6 +181,7 @@ def run_development_selection(
                 document_split_manifest_sha256=document_split_manifest_sha256,
                 evaluated_size_grid=size_grid,
                 evaluated_context_token_budgets=context_token_budgets,
+                primary_context_token_budget=primary_context_token_budget,
             ),
             bootstrap_samples=bootstrap_samples,
         )
@@ -189,7 +198,7 @@ def run_development_selection(
             tokenizer_id=config.tokenizer_id,
             benchmark_version=benchmark.version,
             development_benchmark_manifest_sha256=(
-                selected_trial.report.manifest_sha256
+                benchmark.manifest_sha256
             ),
             document_split_manifest_sha256=document_split_manifest_sha256,
             retrieval_configuration={
@@ -218,9 +227,11 @@ def run_development_selection(
 def select_development_trial(
     trials: tuple[DevelopmentTrial, ...],
     *,
+    primary_context_token_budget: int,
     bootstrap_samples: int = 2000,
 ) -> tuple[DevelopmentTrial, StrategyResult]:
     eligible: list[tuple[DevelopmentTrial, StrategyResult]] = []
+    primary_trial_found = False
     for trial in trials:
         results = {result.strategy_name: result for result in trial.report.strategy_results}
         required = {
@@ -232,6 +243,9 @@ def select_development_trial(
             raise ValueError(
                 "Every development trial must compare exactly the three frozen strategy families."
             )
+        if trial.context_token_budget != primary_context_token_budget:
+            continue
+        primary_trial_found = True
         baseline = results["legacy"]
         zero_overlap = results["clause_v2_zero_body_overlap"]
         semantic_overlap = results["clause_v2_preceding_semantic_unit"]
@@ -249,6 +263,8 @@ def select_development_trial(
             )
             if overlap_gain.lower > 0:
                 eligible.append((trial, semantic_overlap))
+    if not primary_trial_found:
+        raise ValueError("No development trial uses the primary context-token budget.")
     if not eligible:
         raise ValueError(
             "No clause_v2 development candidate satisfies every promotion rule."
@@ -303,6 +319,8 @@ def render_development_selection_markdown(
                 render_benchmark_markdown(trial.report),
             )
         )
+    if isinstance(selection.manifest, ClauseV2NoSelectionManifest):
+        sections.extend(_render_failure_analysis(selection))
     sections.extend(("## Frozen selection", ""))
     if isinstance(selection.manifest, ClauseV2SelectionManifest):
         sections.extend(
@@ -325,6 +343,93 @@ def render_development_selection_markdown(
             )
         )
     return "\n".join(sections)
+
+
+def _render_failure_analysis(
+    selection: DevelopmentSelection,
+) -> tuple[str, ...]:
+    candidate_evaluations: list[tuple[GuardrailEvaluation, ...]] = []
+    semantic_overlap_incomplete = False
+    for trial in selection.trials:
+        results = {
+            result.strategy_name: result
+            for result in trial.report.strategy_results
+        }
+        baseline = results["legacy"]
+        for candidate_name in (
+            "clause_v2_zero_body_overlap",
+            "clause_v2_preceding_semantic_unit",
+        ):
+            candidate = results[candidate_name]
+            if candidate_name == "clause_v2_preceding_semantic_unit":
+                semantic_overlap_incomplete = semantic_overlap_incomplete or not (
+                    candidate.correctness_invariants.get(
+                        "semantic_overlap_complete", True
+                    )
+                )
+            candidate_evaluations.append(
+                evaluate_guardrails(
+                    baseline,
+                    candidate,
+                    bootstrap_samples=selection.bootstrap_samples,
+                )
+            )
+    candidate_count = len(candidate_evaluations)
+    passing_count = sum(
+        all(evaluation.passed for evaluation in evaluations)
+        for evaluations in candidate_evaluations
+    )
+    failures = Counter(
+        evaluation.name
+        for evaluations in candidate_evaluations
+        for evaluation in evaluations
+        if not evaluation.passed
+    )
+    lines = ["## Failure analysis", ""]
+    if not failures:
+        lines.extend(("All evaluated candidates passed every guardrail.", ""))
+        return tuple(lines)
+    lines.extend(
+        (
+            (
+                f"No candidate passed every guardrail (0/{candidate_count})."
+                if passing_count == 0
+                else f"{passing_count}/{candidate_count} candidates passed every guardrail."
+            ),
+            "",
+            "Failed guardrails across the full sensitivity grid:",
+            "",
+        )
+    )
+    for name, count in sorted(
+        failures.items(),
+        key=lambda item: (-item[1], item[0]),
+    ):
+        lines.append(f"- `{name}`: {count}/{candidate_count} candidates failed.")
+    universal = sorted(
+        name for name, count in failures.items() if count == candidate_count
+    )
+    if universal:
+        lines.extend(
+            (
+                "",
+                "Universal blockers: "
+                + ", ".join(f"`{name}`" for name in universal)
+                + ".",
+            )
+        )
+    lines.append("")
+    if semantic_overlap_incomplete:
+        lines.append(
+            "The semantic-overlap candidates also report "
+            "`semantic_overlap_complete: FAIL` when a complete preceding semantic "
+            "unit cannot fit without exceeding `hard_max_chars`. No threshold was "
+            "relaxed and no candidate was selected."
+        )
+    else:
+        lines.append("No threshold was relaxed and no candidate was selected.")
+    lines.append("")
+    return tuple(lines)
 
 
 def _passes_guardrails(

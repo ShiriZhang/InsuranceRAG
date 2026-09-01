@@ -21,6 +21,7 @@
       1600
     ]
   ],
+  "primary_context_token_budget": 4000,
   "reason": "No clause_v2 development candidate satisfies every promotion rule.",
   "selection_rules_version": "clause-v2-development-selection/v1.0.0",
   "selection_status": "no_eligible_candidate",

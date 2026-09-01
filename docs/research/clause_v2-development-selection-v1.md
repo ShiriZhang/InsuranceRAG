@@ -567,6 +567,25 @@ Frozen manifest SHA-256: `de90892ff8192ce788b0050cd85ce6e8dbb0361f832324a3d989a9
 - clause_v2_zero_body_overlap minus legacy: Coverage@3 +11.78% [+5.46%, +18.10%]; Coverage under token budget -0.57% [-6.03%, +4.60%].
 - clause_v2_preceding_semantic_unit minus legacy: Coverage@3 +13.79% [+7.76%, +20.11%]; Coverage under token budget -0.86% [-6.03%, +4.02%].
 
+## Failure analysis
+
+No candidate passed every guardrail (0/18).
+
+Failed guardrails across the full sensitivity grid:
+
+- `hard_negative_ci_upper`: 18/18 candidates failed.
+- `p95_chunking_latency_ratio`: 18/18 candidates failed.
+- `coverage_budget_ci_lower`: 10/18 candidates failed.
+- `boundary_coverage_ci_lower`: 9/18 candidates failed.
+- `correctness_invariants`: 9/18 candidates failed.
+- `boundary_coverage_gain`: 4/18 candidates failed.
+- `embedding_token_ratio`: 3/18 candidates failed.
+- `retrieval_unit_ratio`: 3/18 candidates failed.
+
+Universal blockers: `hard_negative_ci_upper`, `p95_chunking_latency_ratio`.
+
+The semantic-overlap candidates also report `semantic_overlap_complete: FAIL` when a complete preceding semantic unit cannot fit without exceeding `hard_max_chars`. No threshold was relaxed and no candidate was selected.
+
 ## Frozen selection
 
 - Status: `no_eligible_candidate`

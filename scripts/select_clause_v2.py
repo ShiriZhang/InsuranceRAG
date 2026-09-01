@@ -171,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         dataset_split=DatasetSplit.DEVELOPMENT,
         size_grid=config.size_grid,
         context_token_budgets=config.context_token_budgets,
+        primary_context_token_budget=config.primary_context_token_budget,
         document_split_manifest_sha256=document_split.manifest_sha256,
         embedder=embedder,
         token_counter=token_counter,
