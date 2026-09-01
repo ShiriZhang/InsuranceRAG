@@ -19,6 +19,7 @@ from insurance_rag.silver_benchmark import (
     adjudicate_annotations,
     build_frozen_benchmark,
     generate_frozen_benchmark,
+    load_frozen_benchmark_manifest,
     render_benchmark_markdown,
     run_frozen_benchmark,
     source_from_pdf_bytes,
@@ -180,6 +181,26 @@ def test_frozen_manifest_records_hashes_models_prompts_parameters_and_outcomes()
     }
 
 
+def test_frozen_manifest_can_be_rehydrated_only_with_matching_sources():
+    source = _source()
+    benchmark = build_frozen_benchmark(
+        sources=(source,),
+        annotation_pairs={
+            source.source_id: ((_draft("a", "model-a"), _draft("b", "model-b")),)
+        },
+        adjudications={},
+        config=_config(),
+    )
+
+    loaded = load_frozen_benchmark_manifest(
+        benchmark.to_manifest(), sources=(source,)
+    )
+
+    assert loaded.manifest_sha256 == benchmark.manifest_sha256
+    with pytest.raises(ValueError, match="source is unavailable"):
+        load_frozen_benchmark_manifest(benchmark.to_manifest(), sources=())
+
+
 def test_small_frozen_fixture_uses_same_judge_and_retrieval_configuration():
     source = _source()
     benchmark = build_frozen_benchmark(
@@ -217,6 +238,7 @@ def test_small_frozen_fixture_uses_same_judge_and_retrieval_configuration():
         assert result.retrieval_unit_count > 0
         assert result.chunking_latency_seconds >= 0
         assert result.hard_negative_confusions == {"similar_clause": 0}
+        assert all(result.correctness_invariants.values())
     assert report.paired_comparisons[0].coverage_at_3.confidence_level == 0.95
 
     markdown = render_benchmark_markdown(report)
@@ -224,6 +246,33 @@ def test_small_frozen_fixture_uses_same_judge_and_retrieval_configuration():
     assert "Coverage under token budget" in markdown
     assert "Annotation disagreement" in markdown
     assert "Paired 95% confidence intervals" in markdown
+
+
+def test_irrelevant_context_is_measured_within_the_fixed_token_budget():
+    source = _source()
+    benchmark = build_frozen_benchmark(
+        sources=(source,),
+        annotation_pairs={
+            source.source_id: ((_draft("a", "model-a"), _draft("b", "model-b")),)
+        },
+        adjudications={},
+        config=replace(_config(), context_token_budget=len(source.pages[0].text)),
+    )
+
+    report = run_frozen_benchmark(
+        benchmark,
+        strategies=(StrategyConfig(name="legacy", chunking_strategy="legacy"),),
+        embedder=KeywordEmbedder(),
+        token_counter=CharacterTokenCounter(),
+        bootstrap_samples=100,
+    )
+
+    expected = (
+        len(source.pages[0].text) - len("等待期为九十日。")
+    ) / len(source.pages[0].text)
+    assert report.strategy_results[0].irrelevant_context_proportion == pytest.approx(
+        expected
+    )
 
 
 def test_uncertain_cases_are_excluded_from_primary_scores_but_reported():
@@ -255,6 +304,43 @@ def test_uncertain_cases_are_excluded_from_primary_scores_but_reported():
     assert report.annotation_summary.adjudicated_cases == 1
     assert report.annotation_summary.uncertain_exclusions == 1
     assert report.strategy_results[0].scored_cases == 0
+
+
+def test_unparseable_source_with_only_uncertain_cases_is_not_indexed():
+    source = _source()
+    first = _draft("first", "model-a")
+    second = _draft("second", "model-b", quote="第六条 等待期", start_char=0)
+    third = replace(
+        first,
+        evidence_spans=(),
+        hard_negative_category=None,
+        hard_negative_spans=(),
+        metadata=_metadata("third", "model-c"),
+        annotation_uncertain=True,
+    )
+    benchmark = build_frozen_benchmark(
+        sources=(source,),
+        annotation_pairs={source.source_id: ((first, second),)},
+        adjudications={(source.source_id, 0): third},
+        config=_config(),
+    )
+    empty_source = replace(
+        source,
+        pages=tuple(replace(page, text="") for page in source.pages),
+    )
+
+    report = run_frozen_benchmark(
+        replace(benchmark, sources=(empty_source,)),
+        strategies=(StrategyConfig(name="legacy", chunking_strategy="legacy"),),
+        embedder=KeywordEmbedder(),
+        token_counter=CharacterTokenCounter(),
+    )
+
+    result = report.strategy_results[0]
+    assert result.scored_cases == 0
+    assert result.retrieval_unit_count == 0
+    assert result.embedding_tokens == 0
+    assert all(result.correctness_invariants.values())
 
 
 def test_changed_judge_or_retrieval_configuration_requires_new_frozen_version():

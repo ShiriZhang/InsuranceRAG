@@ -3,6 +3,9 @@ from enum import Enum
 
 
 CHUNKING_STRATEGIES = frozenset({"legacy", "clause_v2"})
+BODY_OVERLAP_MODES = frozenset(
+    {"zero_body_overlap", "preceding_semantic_unit"}
+)
 PAGE_QUALITY_UNREADABLE = "unreadable_page"
 PAGE_QUALITY_SEVERE_OCR_UNCERTAINTY = "severe_ocr_uncertainty"
 BOUNDARY_LEGACY_PAGE_LINE_PACKING = "legacy_page_line_packing"
@@ -11,6 +14,7 @@ BOUNDARY_LOW_CONFIDENCE_HEADING_CANDIDATE = "low_confidence_heading_candidate"
 BOUNDARY_REJECTED_PAGE_HEADER_FOOTER = "rejected_page_header_footer"
 BOUNDARY_CROSS_PAGE_CLAUSE_CONTINUATION = "cross_page_clause_continuation"
 BOUNDARY_CHARACTER_WINDOW_FALLBACK = "character_window_fallback"
+BOUNDARY_SEMANTIC_OVERLAP_UNAVAILABLE = "semantic_overlap_unavailable"
 BOUNDARY_PAGE_GAP_EMPTY = "page_gap:empty"
 BOUNDARY_PAGE_GAP_UNREADABLE = "page_gap:unreadable"
 BOUNDARY_PAGE_GAP_SEVERE_OCR_UNCERTAINTY = "page_gap:severe_ocr_uncertainty"
@@ -66,15 +70,23 @@ class DocumentChunk:
     heading_confidence: str = "low"
     heading_source: str = "fallback"
     retrieval_context: str = ""
+    body_overlap_context: str = ""
     source_spans: tuple[SourceSpan, ...] = ()
     boundary_diagnostics: tuple[str, ...] = ()
     chunking_strategy: str = "legacy"
+    trusted_heading_count: int = 0
 
     @property
     def retrieval_text(self) -> str:
-        if not self.retrieval_context:
-            return self.text
-        return f"{self.retrieval_context}\n{self.text}"
+        return "\n".join(
+            value
+            for value in (
+                self.retrieval_context,
+                self.body_overlap_context,
+                self.text,
+            )
+            if value
+        )
 
     @property
     def authoritative_text(self) -> str:

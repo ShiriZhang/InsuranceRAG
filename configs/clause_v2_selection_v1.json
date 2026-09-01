@@ -1,0 +1,29 @@
+{
+  "benchmark_version": "silver-evidence-benchmark/v2.0.0",
+  "development_benchmark_manifest_sha256": "2275e65fe187ca06d3a55e680ff1bba4e784cd2b80f1d4f481bfeef546501cde",
+  "document_split_manifest_sha256": "5925f24e45bdbb817f95bc573da73a0d0f3482bbf85506d5202f3b4a38f71b65",
+  "evaluated_context_token_budgets": [
+    2000,
+    4000,
+    8000
+  ],
+  "evaluated_size_grid": [
+    [
+      600,
+      900
+    ],
+    [
+      900,
+      1200
+    ],
+    [
+      1200,
+      1600
+    ]
+  ],
+  "primary_context_token_budget": 4000,
+  "reason": "No clause_v2 development candidate satisfies every promotion rule.",
+  "selection_rules_version": "clause-v2-development-selection/v1.0.0",
+  "selection_status": "no_eligible_candidate",
+  "strategy": null
+}
